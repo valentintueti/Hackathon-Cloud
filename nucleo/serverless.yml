@@ -65,7 +65,16 @@ functions:
           arn: !GetAtt ColaTelemetria.Arn
           batchSize: 50              
           maximumBatchingWindow: 10  
-          functionResponseType: ReportBatchItemFailures  
+          functionResponseType: ReportBatchItemFailures 
+  exportarBigquery:
+      handler: handlers/exportar_bigquery.handler
+      description: Exporta cada hora la telemetria nueva de S3 a BigQuery (Google Cloud)
+      timeout: 300
+      memorySize: 512
+      layers:
+        - !Ref ComunLambdaLayer
+      events:
+        - schedule: rate(1 hour) 
 
 
 resources:
