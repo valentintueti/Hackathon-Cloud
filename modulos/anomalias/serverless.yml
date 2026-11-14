@@ -1,0 +1,123 @@
+org: valentintuesta
+service: arquifusion-anomalias
+frameworkVersion: '4'
+
+custom:
+  nucleoStack: arquifusion-nucleo-${sls:stage}
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 29
+  logRetentionInDays: 14
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  environment:
+    STAGE: ${sls:stage}
+    TABLA_MAQUINA: ${cf:${self:custom.nucleoStack}.TablaMaquina}
+    TABLA_MODELO: ${cf:${self:custom.nucleoStack}.TablaModelo}
+    TABLA_ALERTA: ${cf:${self:custom.nucleoStack}.TablaAlerta}
+    SECRET_NAME: arquifusion/${sls:stage}/config
+    MINUTOS_ENTRE_ALERTAS: "30"
+    TAMANO_VENTANA: "10"
+
+package:
+  patterns:
+    - '!**'
+    - 'handler.py'
+    - 'reglas.py'
+
+plugins:
+  - serverless-step-functions
+
+functions:
+  evaluar:
+    handler: handler.evaluar
+    description: Evalua cada lote de lecturas (puntaje multivariable) e inicia la Step Function si hay anomalia
+    timeout: 60
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    environment:
+      STATE_MACHINE_ARN: !Ref AnomaliasStateMachine
+    events:
+      - eventBridge:
+          eventBus: ${cf:${self:custom.nucleoStack}.BusArn}
+          pattern:
+            source:
+              - arquifusion.nucleo
+            detail-type:
+              - LecturasProcesadas
+
+  registrarAlerta:
+    handler: handler.registrar_alerta
+    description: (Step Function) guarda la alerta en ALERTA y arma el mensaje
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+stepFunctions:
+  stateMachines:
+    anomalias:
+      id: AnomaliasStateMachine
+      name: anomalias-${sls:stage}
+      type: STANDARD
+      role: arn:aws:iam::${aws:accountId}:role/LabRole
+      definition:
+        Comment: Registra una anomalia, avisa a los demas modulos y notifica si es critica
+        StartAt: RegistrarAlerta
+        States:
+          RegistrarAlerta:
+            Type: Task
+            Resource: !GetAtt RegistrarAlertaLambdaFunction.Arn
+            Retry:
+              - ErrorEquals: ["States.TaskFailed"]
+                IntervalSeconds: 5
+                MaxAttempts: 2
+                BackoffRate: 2.0
+            Next: PublicarEvento
+
+          PublicarEvento:
+            Type: Task
+            Resource: arn:aws:states:::events:putEvents
+            Parameters:
+              Entries:
+                - EventBusName: ${cf:${self:custom.nucleoStack}.BusName}
+                  Source: arquifusion.anomalias
+                  DetailType: AlertaCreada
+                  Detail.$: $.alerta
+            ResultPath: null
+            Next: EsCritica
+
+          EsCritica:
+            Type: Choice
+            Choices:
+              - Variable: $.critica
+                BooleanEquals: true
+                Next: Notificar
+            Default: Fin
+
+          Notificar:
+            Type: Task
+            Resource: arn:aws:states:::sns:publish
+            Parameters:
+              TopicArn: !Ref TopicAlertasMantenimiento
+              Subject.$: $.asunto
+              Message.$: $.mensaje
+            ResultPath: null
+            Next: Fin
+
+          Fin:
+            Type: Succeed
+
+resources:
+  Resources:
+    TopicAlertasMantenimiento:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: alertas-mantenimiento-${sls:stage}
+
+  Outputs:
+    TopicAlertasMantenimientoArn:
+      Value: !Ref TopicAlertasMantenimiento
