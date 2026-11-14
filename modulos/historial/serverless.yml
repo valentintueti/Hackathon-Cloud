@@ -1,0 +1,162 @@
+org: valentintuesta
+service: arquifusion-historial
+frameworkVersion: '4'
+
+custom:
+  nucleoStack: arquifusion-nucleo-${sls:stage}
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 29
+  logRetentionInDays: 14
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  environment:
+    STAGE: ${sls:stage}
+    TABLA_ORDEN_TRABAJO: ${cf:${self:custom.nucleoStack}.TablaOrdenTrabajo}
+    BUS: ${cf:${self:custom.nucleoStack}.BusName}
+    SECRET_NAME: arquifusion/${sls:stage}/config
+    DIAS_REINCIDENCIA: "30"
+
+package:
+  patterns:
+    - '!**'
+    - 'handler.py'
+    - 'logica.py'
+
+plugins:
+  - serverless-step-functions
+
+functions:
+  crear:
+    handler: handler.crear
+    description: POST /historial/incidentes - registra el incidente e inicia su ciclo
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    environment:
+      STATE_MACHINE_ARN: !Ref CicloIncidenteStateMachine
+    events:
+      - http:
+          path: historial/incidentes
+          method: post
+          cors: true
+
+  avanzar:
+    handler: handler.avanzar
+    description: POST /historial/incidentes/{id}/estado - cambia de estado y reanuda la Step Function
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: historial/incidentes/{orden_id}/estado
+          method: post
+          cors: true
+
+  historial:
+    handler: handler.historial
+    description: GET /historial/maquinas/{id} - historial y metricas de una maquina
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: historial/maquinas/{maquina_id}
+          method: get
+          cors: true
+
+  guardarToken:
+    handler: handler.guardar_token
+    description: (Step Function) guarda el task token de la etapa que se espera
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  cerrar:
+    handler: handler.cerrar
+    description: (Step Function) calcula tiempos del incidente y publica OrdenCerrada
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  desdeAlerta:
+    handler: handler.desde_alerta
+    description: Crea un incidente cuando llega una AlertaCreada alta o critica (si existe el modulo de anomalias)
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    environment:
+      STATE_MACHINE_ARN: !Ref CicloIncidenteStateMachine
+    events:
+      - eventBridge:
+          eventBus: ${cf:${self:custom.nucleoStack}.BusArn}
+          pattern:
+            detail-type:
+              - AlertaCreada
+            detail:
+              severidad:
+                - alta
+                - critica
+
+stepFunctions:
+  stateMachines:
+    cicloIncidente:
+      id: CicloIncidenteStateMachine
+      name: ciclo-incidente-${sls:stage}
+      type: STANDARD
+      role: arn:aws:iam::${aws:accountId}:role/LabRole
+      definition:
+        Comment: Ciclo de vida de un incidente - espera cada cambio de estado con task tokens
+        StartAt: EsperarAsignacion
+        States:
+          EsperarAsignacion:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke.waitForTaskToken
+            Parameters:
+              FunctionName: !GetAtt GuardarTokenLambdaFunction.Arn
+              Payload:
+                orden_id.$: $.orden_id
+                etapa: asignada
+                token.$: $$.Task.Token
+            TimeoutSeconds: 604800
+            ResultPath: $.asignacion
+            Next: EsperarAtencion
+
+          EsperarAtencion:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke.waitForTaskToken
+            Parameters:
+              FunctionName: !GetAtt GuardarTokenLambdaFunction.Arn
+              Payload:
+                orden_id.$: $.orden_id
+                etapa: en_atencion
+                token.$: $$.Task.Token
+            TimeoutSeconds: 604800
+            ResultPath: $.atencion
+            Next: EsperarResolucion
+
+          EsperarResolucion:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke.waitForTaskToken
+            Parameters:
+              FunctionName: !GetAtt GuardarTokenLambdaFunction.Arn
+              Payload:
+                orden_id.$: $.orden_id
+                etapa: hecha
+                token.$: $$.Task.Token
+            TimeoutSeconds: 604800
+            ResultPath: $.resolucion
+            Next: Cerrar
+
+          Cerrar:
+            Type: Task
+            Resource: !GetAtt CerrarLambdaFunction.Arn
+            Retry:
+              - ErrorEquals: ["States.TaskFailed"]
+                IntervalSeconds: 5
+                MaxAttempts: 2
+                BackoffRate: 2.0
+            End: true
+
+  Outputs:
+    CicloIncidenteArn:
+      Value: !Ref CicloIncidenteStateMachine
