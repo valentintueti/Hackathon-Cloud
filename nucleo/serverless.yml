@@ -1,0 +1,242 @@
+org: valentintuesta
+service: arquifusion-nucleo
+frameworkVersion: '4'
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 29
+  logRetentionInDays: 14
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  environment:
+    STAGE: ${sls:stage}
+    TABLA_MAQUINA: !Ref TablaMaquina
+    TABLA_ZONA: !Ref TablaZona
+    TABLA_MODELO: !Ref TablaModelo
+    TABLA_ALERTA: !Ref TablaAlerta
+    TABLA_ORDEN_TRABAJO: !Ref TablaOrdenTrabajo
+    COLA_TELEMETRIA: !Ref ColaTelemetria
+    BUCKET_TELEMETRIA: !Ref BucketTelemetria
+    BUS: !Ref BusArquifusion
+    SECRET_NAME: arquifusion/${sls:stage}/config
+
+
+package:
+  patterns:
+    - '!**'
+    - 'handlers/**'
+
+layers:
+  comun:
+    path: layer
+    name: arquifusion-${sls:stage}-comun
+    description: Codigo compartido de ArquiFusion (config, DynamoDB)
+    compatibleRuntimes:
+      - python3.12
+    package:
+      patterns:
+        - '**'
+        - '!**/__pycache__/**'
+
+functions:
+  recibir:
+    handler: handlers/recibir.handler
+    description: POST /telemetria - valida las lecturas y las encola en SQS
+    layers:
+      - !Ref ComunLambdaLayer
+    events:
+      - http:
+          path: telemetria
+          method: post
+          cors: true
+
+  ingesta:
+    handler: handlers/ingesta.handler
+    description: Procesa lotes de SQS - estado en DynamoDB, historico en S3, evento LecturasProcesadas
+    timeout: 60
+    layers:
+      - !Ref ComunLambdaLayer
+    events:
+      - sqs:
+          arn: !GetAtt ColaTelemetria.Arn
+          batchSize: 50              
+          maximumBatchingWindow: 10  
+          functionResponseType: ReportBatchItemFailures  
+
+
+resources:
+  Resources:
+    TablaMaquina:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: arquifusion-${sls:stage}-maquina
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: maquina_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: maquina_id
+            KeyType: HASH
+
+    TablaZona:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: arquifusion-${sls:stage}-zona
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: zona_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: zona_id
+            KeyType: HASH
+
+    TablaModelo:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: arquifusion-${sls:stage}-modelo
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: modelo_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: modelo_id
+            KeyType: HASH
+
+    TablaAlerta:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: arquifusion-${sls:stage}-alerta
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: alerta_id
+            AttributeType: S
+          - AttributeName: maquina_id
+            AttributeType: S
+          - AttributeName: ts
+            AttributeType: S
+        KeySchema:
+          - AttributeName: alerta_id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: por_maquina
+            KeySchema:
+              - AttributeName: maquina_id
+                KeyType: HASH
+              - AttributeName: ts
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+
+    TablaOrdenTrabajo:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: arquifusion-${sls:stage}-orden_trabajo
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: orden_id
+            AttributeType: S
+          - AttributeName: maquina_id
+            AttributeType: S
+          - AttributeName: ts_creada
+            AttributeType: S
+        KeySchema:
+          - AttributeName: orden_id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: por_maquina
+            KeySchema:
+              - AttributeName: maquina_id
+                KeyType: HASH
+              - AttributeName: ts_creada
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+
+    ColaTelemetriaDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: arquifusion-${sls:stage}-telemetria-dlq
+        MessageRetentionPeriod: 1209600 # 14 días
+
+    ColaTelemetria:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: arquifusion-${sls:stage}-telemetria
+        VisibilityTimeout: 360
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt ColaTelemetriaDLQ.Arn
+          maxReceiveCount: 3
+
+
+    BucketTelemetria:
+      Type: AWS::S3::Bucket
+      Properties:
+        VersioningConfiguration:
+          Status: Enabled
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        LifecycleConfiguration:
+          Rules:
+            - Id: archivar-telemetria-antigua
+              Status: Enabled
+              Prefix: telemetria/
+              Transitions:
+                - StorageClass: GLACIER
+                  TransitionInDays: 90
+
+
+    BusArquifusion:
+      Type: AWS::Events::EventBus
+      Properties:
+        Name: arquifusion-${sls:stage}
+
+
+    ConfigSecreta:
+      Type: AWS::SecretsManager::Secret
+      Properties:
+        Name: arquifusion/${sls:stage}/config
+        Description: Variables globales de ArquiFusion. El valor real se carga fuera del repositorio.
+        SecretString: '{"pendiente": true}'
+
+  Outputs:
+    ComunLayerArn:
+      Value: !Ref ComunLambdaLayer
+    RestApiId:
+      Value: !Ref ApiGatewayRestApi
+    RestApiRootResourceId:
+      Value: !GetAtt ApiGatewayRestApi.RootResourceId
+    BusName:
+      Value: !Ref BusArquifusion
+    BusArn:
+      Value: !GetAtt BusArquifusion.Arn
+    BucketTelemetria:
+      Value: !Ref BucketTelemetria
+    TablaMaquina:
+      Value: !Ref TablaMaquina
+    TablaZona:
+      Value: !Ref TablaZona
+    TablaModelo:
+      Value: !Ref TablaModelo
+    TablaAlerta:
+      Value: !Ref TablaAlerta
+    TablaOrdenTrabajo:
+      Value: !Ref TablaOrdenTrabajo
+    SecretName:
+      Value: arquifusion/${sls:stage}/config
