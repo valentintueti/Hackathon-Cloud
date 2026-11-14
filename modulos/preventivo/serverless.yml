@@ -1,0 +1,125 @@
+org: valentintuesta
+service: arquifusion-preventivo
+frameworkVersion: '4'
+
+custom:
+  nucleoStack: arquifusion-nucleo-${sls:stage}
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 29
+  logRetentionInDays: 14
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  environment:
+    STAGE: ${sls:stage}
+    TABLA_MAQUINA: ${cf:${self:custom.nucleoStack}.TablaMaquina}
+    TABLA_MODELO: ${cf:${self:custom.nucleoStack}.TablaModelo}
+    TABLA_ORDEN_TRABAJO: ${cf:${self:custom.nucleoStack}.TablaOrdenTrabajo}
+    SECRET_NAME: arquifusion/${sls:stage}/config
+    SNS_TOPIC_ARN: !Ref TopicMantenimientoPreventivo
+    UMBRAL_ORDEN_PCT: "90"
+    UMBRAL_PRIORIDAD_ALTA_PCT: "100"
+    INTERVALO_DEFECTO_HORAS: "250"
+    CAPACIDAD_DEFECTO: "100"
+    RPM_NOMINAL: "1800"
+    TEMPERATURA_NOMINAL: "80"
+    FACTOR_MIN: "0.5"
+    FACTOR_MAX: "1.5"
+    VENTANA_RESPALDO_DIAS: "400"
+
+package:
+  patterns:
+    - '!**'
+    - 'handler.py'
+    - 'sql/**'
+
+plugins:
+  - serverless-step-functions
+
+functions:
+  calcularIndice:
+    handler: handler.calcular_indice
+    timeout: 120
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  crearOrdenes:
+    handler: handler.crear_ordenes
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  completarOrden:
+    handler: handler.completar_orden
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: ordenes/{orden_id}/completar
+          method: post
+          cors: true
+
+stepFunctions:
+  stateMachines:
+    preventivo:
+      name: preventivo
+      role: arn:aws:iam::${aws:accountId}:role/LabRole
+      definition:
+        StartAt: CalcularIndice
+        States:
+          CalcularIndice:
+            Type: Task
+            Resource: !GetAtt CalcularIndiceLambdaFunction.Arn
+            ResultPath: "$.resultadoCalculo"
+            Retry:
+              - ErrorEquals: ["States.TaskFailed"]
+                IntervalSeconds: 15
+                MaxAttempts: 2
+                BackoffRate: 2.0
+            Next: HayMaquinasSobreUmbral
+
+          HayMaquinasSobreUmbral:
+            Type: Choice
+            Choices:
+              - Variable: "$.resultadoCalculo.maquinasPorAtender"
+                NumericGreaterThan: 0
+                Next: CrearOrdenes
+            Default: SinAccion
+
+          CrearOrdenes:
+            Type: Task
+            Resource: !GetAtt CrearOrdenesLambdaFunction.Arn
+            End: true
+
+          SinAccion:
+            Type: Pass
+            Result: "Ninguna maquina supero el 90% de su intervalo hoy"
+            End: true
+
+resources:
+  Resources:
+    TopicMantenimientoPreventivo:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: mantenimiento-preventivo
+
+    ScheduleEjecucionDiariaPreventivo:
+      Type: AWS::Scheduler::Schedule
+      Properties:
+        Name: preventivo-ejecucion-diaria-${sls:stage}
+        Description: Dispara la Step Function preventivo una vez al dia (06:00 UTC)
+        ScheduleExpression: cron(0 6 * * ? *)
+        FlexibleTimeWindow:
+          Mode: "OFF"
+        Target:
+          Arn: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:preventivo"
+          RoleArn: arn:aws:iam::${aws:accountId}:role/LabRole
+          Input: "{}"
+
+  Outputs:
+    TopicMantenimientoPreventivoArn:
+      Value: !Ref TopicMantenimientoPreventivo
