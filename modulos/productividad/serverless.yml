@@ -1,0 +1,147 @@
+org: valentintuesta
+service: arquifusion-productividad
+frameworkVersion: '4'
+
+custom:
+  nucleoStack: arquifusion-nucleo-${sls:stage}
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 29
+  logRetentionInDays: 14
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  environment:
+    STAGE: ${sls:stage}
+    TABLA_RECOMENDACION_FLOTA: !Ref TablaRecomendacionFlota
+    SECRET_NAME: arquifusion/${sls:stage}/config
+    DIAS_KPI: "60"
+    DIAS_ANALISIS: "7"
+    HORAS_TURNO: "10"
+    HORAS_MAX_DIA: "12"
+    DIAS_EXCESIVOS_MIN: "2"
+    UTILIZACION_MIN_PCT: "40"
+    PCT_COSTO: "30"
+    PCT_CARGA: "20"
+    PRECIO_LITRO: "4.5"
+    COSTO_HORA: "0"
+    RPM_RALENTI: "900"
+
+package:
+  patterns:
+    - '!**'
+    - 'handler.py'
+    - 'prompts.py'
+    - 'sql/**'
+
+plugins:
+  - serverless-step-functions
+
+functions:
+  calcularKpis:
+    handler: handler.calcular_kpis
+    description: (Step Function) recalcula kpi_diario en BigQuery y devuelve las maquinas con hallazgos
+    timeout: 120
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  recomendar:
+    handler: handler.recomendar
+    description: (Step Function) arma acciones de redistribucion por reglas, Gemini redacta el resumen y se guarda
+    timeout: 30
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  ultima:
+    handler: handler.ultima
+    description: GET /productividad/recomendaciones - recomendacion del dia (o de la fecha indicada)
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: productividad/recomendaciones
+          method: get
+          cors: true
+
+stepFunctions:
+  stateMachines:
+    productividad:
+      id: ProductividadStateMachine
+      name: productividad-${sls:stage}
+      type: STANDARD
+      role: arn:aws:iam::${aws:accountId}:role/LabRole
+      definition:
+        Comment: Cada manana recalcula los KPI de la flota y recomienda como redistribuirla
+        StartAt: CalcularKpis
+        States:
+          CalcularKpis:
+            Type: Task
+            Resource: !GetAtt CalcularKpisLambdaFunction.Arn
+            Retry:
+              - ErrorEquals: ["States.TaskFailed"]
+                IntervalSeconds: 30
+                MaxAttempts: 2
+                BackoffRate: 2.0
+            Next: HayHallazgos
+
+          HayHallazgos:
+            Type: Choice
+            Choices:
+              - Variable: $.cantidad
+                NumericGreaterThan: 0
+                Next: Recomendar
+            Default: SinHallazgos
+
+          Recomendar:
+            Type: Task
+            Resource: !GetAtt RecomendarLambdaFunction.Arn
+            Retry:
+              - ErrorEquals: ["States.TaskFailed"]
+                IntervalSeconds: 10
+                MaxAttempts: 2
+                BackoffRate: 2.0
+            End: true
+
+          SinHallazgos:
+            Type: Pass
+            Result: "Ninguna maquina tuvo hallazgos de productividad"
+            End: true
+
+resources:
+  Resources:
+    TablaRecomendacionFlota:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: arquifusion-${sls:stage}-recomendacion_flota
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: fecha
+            AttributeType: S
+        KeySchema:
+          - AttributeName: fecha
+            KeyType: HASH
+
+    ScheduleProductividad:
+      Type: AWS::Scheduler::Schedule
+      Properties:
+        Name: productividad-diario-${sls:stage}
+        Description: Dispara la Step Function productividad cada manana (06:45 hora de Peru)
+        ScheduleExpression: cron(45 6 * * ? *)
+        ScheduleExpressionTimezone: America/Lima
+        State: ENABLED
+        FlexibleTimeWindow:
+          Mode: "OFF"
+        Target:
+          Arn: !Ref ProductividadStateMachine
+          RoleArn: arn:aws:iam::${aws:accountId}:role/LabRole
+          Input: "{}"
+
+  Outputs:
+    TablaRecomendacionFlota:
+      Value: !Ref TablaRecomendacionFlota
