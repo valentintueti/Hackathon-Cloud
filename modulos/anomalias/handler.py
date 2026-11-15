@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 import boto3
 
 import reglas
+import prompts
+from comun import ia
 from comun.config import env
 from comun.ddb import a_dynamo, actualizar, tabla
 
@@ -57,6 +59,10 @@ def evaluar(event, context):
                     "severidad": severidad,
                     "variables_afectadas": afectadas,
                     "valores": {v: lectura.get(v) for v in reglas.PESOS},
+                    "umbrales": {
+                        v: {"normal": float(u["normal"]), "limite": float(u["limite"])}
+                        for v, u in umbrales.items() if v in reglas.PESOS
+                    },
                     "tendencia_creciente": puntaje_final > puntaje,
                 }),
             )
@@ -74,6 +80,10 @@ def registrar_alerta(event, context):
         "estado": "abierta",
         **event,
     }
+    analisis = _explicar(event)
+    if analisis:
+        alerta["explicacion_ia"] = analisis["explicacion"]
+        alerta["revisar_primero_ia"] = analisis["revisar_primero"]
     alertas.put_item(Item=a_dynamo({k: v for k, v in alerta.items() if v is not None}))
 
     variables = ", ".join(event["variables_afectadas"]) or "variables en el límite"
@@ -86,12 +96,29 @@ def registrar_alerta(event, context):
         f"Tendencia creciente: {'sí' if event['tendencia_creciente'] else 'no'}\n"
         f"Lectura: {event['ts_lectura']}"
     )
+    if analisis:
+        pasos = "\n".join(f"{i}. {p}" for i, p in enumerate(analisis["revisar_primero"], 1))
+        mensaje += f"\n\nExplicación (IA): {analisis['explicacion']}"
+        if pasos:
+            mensaje += f"\nRevisar primero:\n{pasos}"
     return {
         "alerta": alerta,
         "critica": event["severidad"] == "critica",
         "asunto": asunto[:100],
         "mensaje": mensaje,
     }
+
+
+def _explicar(event):
+    respuesta = ia.generar_json(prompts.construir(event), prompts.SISTEMA)
+    if not isinstance(respuesta, dict):
+        return None
+    explicacion = respuesta.get("explicacion")
+    if not isinstance(explicacion, str) or not explicacion.strip():
+        return None
+    pasos = respuesta.get("revisar_primero")
+    pasos = [str(p).strip()[:200] for p in pasos if str(p).strip()] if isinstance(pasos, list) else []
+    return {"explicacion": explicacion.strip()[:800], "revisar_primero": pasos[:3]}
 
 def _umbrales(modelo_id, cache):
     if modelo_id not in cache:
