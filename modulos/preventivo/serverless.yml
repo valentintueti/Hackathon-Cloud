@@ -20,6 +20,7 @@ provider:
     TABLA_MAQUINA: ${cf:${self:custom.nucleoStack}.TablaMaquina}
     TABLA_MODELO: ${cf:${self:custom.nucleoStack}.TablaModelo}
     TABLA_ORDEN_TRABAJO: ${cf:${self:custom.nucleoStack}.TablaOrdenTrabajo}
+    BUS: ${cf:${self:custom.nucleoStack}.BusName}
     SECRET_NAME: arquifusion/${sls:stage}/config
     SNS_TOPIC_ARN: !Ref TopicMantenimientoPreventivo
     UMBRAL_ORDEN_PCT: "90"
@@ -66,8 +67,7 @@ functions:
 stepFunctions:
   stateMachines:
     preventivo:
-      id: PreventivoStateMachine # ID logico fijo en CloudFormation (lo usa el Schedule con !Ref)
-      name: preventivo-${sls:stage}
+      name: preventivo
       role: arn:aws:iam::${aws:accountId}:role/LabRole
       definition:
         StartAt: CalcularIndice
@@ -106,20 +106,18 @@ resources:
     TopicMantenimientoPreventivo:
       Type: AWS::SNS::Topic
       Properties:
-        TopicName: mantenimiento-preventivo-${sls:stage}
+        TopicName: mantenimiento-preventivo
 
     ScheduleEjecucionDiariaPreventivo:
       Type: AWS::Scheduler::Schedule
       Properties:
         Name: preventivo-ejecucion-diaria-${sls:stage}
-        Description: Dispara la Step Function preventivo una vez al dia (06:00 hora de Peru)
+        Description: Dispara la Step Function preventivo una vez al dia (06:00 UTC)
         ScheduleExpression: cron(0 6 * * ? *)
-        ScheduleExpressionTimezone: America/Lima
-        State: ENABLED
         FlexibleTimeWindow:
           Mode: "OFF"
         Target:
-          Arn: !Ref PreventivoStateMachine
+          Arn: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:preventivo"
           RoleArn: arn:aws:iam::${aws:accountId}:role/LabRole
           Input: "{}"
 

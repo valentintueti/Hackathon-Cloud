@@ -14,6 +14,9 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 sns = boto3.client("sns")
+events = boto3.client("events")
+
+EVENTOS_POR_LLAMADA = 10
 
 UMBRAL_ORDEN_PCT = float(os.environ.get("UMBRAL_ORDEN_PCT", 90))
 UMBRAL_PRIORIDAD_ALTA_PCT = float(os.environ.get("UMBRAL_PRIORIDAD_ALTA_PCT", 100))
@@ -155,6 +158,19 @@ def crear_ordenes(event, context):
                 ensure_ascii=False,
             ),
         )
+        _publicar_eventos(
+            "OrdenCreada",
+            [
+                {
+                    "orden_id": orden["ordenId"],
+                    "maquina_id": orden["maquinaId"],
+                    "tipo": "preventivo",
+                    "prioridad": orden["prioridad"],
+                    "porcentaje_intervalo": orden["porcentajeIntervalo"],
+                }
+                for orden in ordenes_creadas
+            ],
+        )
 
     logger.info(
         "Ordenes creadas: %s | omitidas por duplicado: %s",
@@ -194,6 +210,18 @@ def completar_orden(event, context):
                 "porcentaje_intervalo": 0,
             },
         )
+
+    _publicar_eventos(
+        "OrdenCerrada",
+        [
+            {
+                "orden_id": orden_id,
+                "maquina_id": orden["maquina_id"],
+                "tipo": orden.get("tipo"),
+                "ts_cerrado": ahora,
+            }
+        ],
+    )
 
     return _respuesta_http(200, {"ordenId": orden_id, "estado": "hecha"})
 
@@ -274,6 +302,27 @@ def _escanear_todo(tabla_ddb):
         respuesta = tabla_ddb.scan(ExclusiveStartKey=respuesta["LastEvaluatedKey"])
         items.extend(respuesta.get("Items", []))
     return items
+
+
+def _publicar_eventos(detail_type, detalles):
+    bus = env("BUS")
+    entradas = [
+        {
+            "EventBusName": bus,
+            "Source": "arquifusion.preventivo",
+            "DetailType": detail_type,
+            "Detail": json.dumps(detalle, ensure_ascii=False),
+        }
+        for detalle in detalles
+    ]
+    for i in range(0, len(entradas), EVENTOS_POR_LLAMADA):
+        resultado = events.put_events(Entries=entradas[i : i + EVENTOS_POR_LLAMADA])
+        if resultado.get("FailedEntryCount"):
+            logger.error(
+                "EventBridge rechazo %s eventos: %s",
+                resultado["FailedEntryCount"],
+                resultado["Entries"],
+            )
 
 
 def _respuesta_http(codigo, cuerpo):
