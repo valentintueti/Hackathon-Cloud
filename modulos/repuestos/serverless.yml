@@ -1,0 +1,197 @@
+org: valentintuesta
+service: arquifusion-repuestos
+frameworkVersion: '4'
+
+custom:
+  nucleoStack: arquifusion-nucleo-${sls:stage}
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 29
+  logRetentionInDays: 14
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  environment:
+    STAGE: ${sls:stage}
+    TABLA_MAQUINA: ${cf:${self:custom.nucleoStack}.TablaMaquina}
+    TABLA_COMPONENTE: !Ref TablaComponente
+    TABLA_INVENTARIO: !Ref TablaInventario
+    TABLA_CONSUMO: !Ref TablaConsumoRepuesto
+    SNS_TOPIC_ARN: !Ref TopicStockBajo
+    SECRET_NAME: arquifusion/${sls:stage}/config
+    DIAS_VENTANA: "90"
+    Z_SERVICIO: "1.65"
+    DIAS_STOCK_OBJETIVO: "30"
+    CV_IRREGULAR: "1"
+    DIAS_ENTRE_USOS_IRREGULAR: "30"
+    MINIMO_IRREGULAR: "1"
+    DIAS_REPOSICION_DEFECTO: "7"
+
+package:
+  patterns:
+    - '!**'
+    - 'handler.py'
+    - 'inventario.py'
+
+plugins:
+  - serverless-step-functions
+
+functions:
+  registrarConsumo:
+    handler: handler.registrar_consumo
+    description: Registra piezas usadas (manual por POST o automatico con OrdenCerrada) y descuenta el stock
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: repuestos/consumos
+          method: post
+          cors: true
+      - eventBridge:
+          eventBus: ${cf:${self:custom.nucleoStack}.BusArn}
+          pattern:
+            detail-type:
+              - OrdenCerrada
+
+  calcularReposicion:
+    handler: handler.calcular_reposicion
+    description: (Step Function) calcula demanda, clasificacion, punto de reorden y stock objetivo por zona y componente
+    timeout: 120
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  avisarStockBajo:
+    handler: handler.avisar_stock_bajo
+    description: (Step Function) envia un solo correo con las piezas por reponer, agrupadas por zona
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+stepFunctions:
+  stateMachines:
+    repuestos:
+      id: RepuestosStateMachine
+      name: repuestos-${sls:stage}
+      type: STANDARD
+      role: arn:aws:iam::${aws:accountId}:role/LabRole
+      definition:
+        Comment: Cada dia recalcula la reposicion de repuestos y avisa las piezas bajo el punto de reorden
+        StartAt: CalcularReposicion
+        States:
+          CalcularReposicion:
+            Type: Task
+            Resource: !GetAtt CalcularReposicionLambdaFunction.Arn
+            Retry:
+              - ErrorEquals: ["States.TaskFailed"]
+                IntervalSeconds: 15
+                MaxAttempts: 2
+                BackoffRate: 2.0
+            Next: HayPiezasBajoReorden
+
+          HayPiezasBajoReorden:
+            Type: Choice
+            Choices:
+              - Variable: $.cantidad
+                NumericGreaterThan: 0
+                Next: AvisarStockBajo
+            Default: SinReposicion
+
+          AvisarStockBajo:
+            Type: Task
+            Resource: !GetAtt AvisarStockBajoLambdaFunction.Arn
+            End: true
+
+          SinReposicion:
+            Type: Pass
+            Result: "Ninguna pieza esta bajo su punto de reorden"
+            End: true
+
+resources:
+  Resources:
+    TablaComponente:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: arquifusion-${sls:stage}-componente
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: componente_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: componente_id
+            KeyType: HASH
+
+    TablaInventario:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: arquifusion-${sls:stage}-inventario
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: zona_id
+            AttributeType: S
+          - AttributeName: componente_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: zona_id
+            KeyType: HASH
+          - AttributeName: componente_id
+            KeyType: RANGE
+
+    TablaConsumoRepuesto:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: arquifusion-${sls:stage}-consumo_repuesto
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: consumo_id
+            AttributeType: S
+          - AttributeName: componente_id
+            AttributeType: S
+          - AttributeName: ts
+            AttributeType: S
+        KeySchema:
+          - AttributeName: consumo_id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: por_componente
+            KeySchema:
+              - AttributeName: componente_id
+                KeyType: HASH
+              - AttributeName: ts
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+
+    TopicStockBajo:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: stock-bajo-${sls:stage}
+
+    ScheduleRepuestos:
+      Type: AWS::Scheduler::Schedule
+      Properties:
+        Name: repuestos-diario-${sls:stage}
+        Description: Dispara la Step Function repuestos cada manana (07:00 hora de Peru)
+        ScheduleExpression: cron(00 7 * * ? *)
+        ScheduleExpressionTimezone: America/Lima
+        State: ENABLED
+        FlexibleTimeWindow:
+          Mode: "OFF"
+        Target:
+          Arn: !Ref RepuestosStateMachine
+          RoleArn: arn:aws:iam::${aws:accountId}:role/LabRole
+          Input: "{}"
+
+  Outputs:
+    TopicStockBajoArn:
+      Value: !Ref TopicStockBajo
+    TablaInventario:
+      Value: !Ref TablaInventario
