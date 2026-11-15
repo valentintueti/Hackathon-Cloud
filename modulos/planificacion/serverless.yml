@@ -1,0 +1,164 @@
+org: valentintuesta
+service: arquifusion-planificacion
+frameworkVersion: '4'
+
+custom:
+  nucleoStack: arquifusion-nucleo-${sls:stage}
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 29
+  logRetentionInDays: 14
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  environment:
+    STAGE: ${sls:stage}
+    TABLA_MAQUINA: ${cf:${self:custom.nucleoStack}.TablaMaquina}
+    TABLA_ALERTA: ${cf:${self:custom.nucleoStack}.TablaAlerta}
+    TABLA_ORDEN_TRABAJO: ${cf:${self:custom.nucleoStack}.TablaOrdenTrabajo}
+    TABLA_RIESGO: !Ref TablaRiesgoFalla
+    SECRET_NAME: arquifusion/${sls:stage}/config
+    DIAS_HISTORIA: "180"
+    HORAS_ANTES_DESDE: "72"
+    HORAS_ANTES_HASTA: "24"
+    DIAS_SIN_FALLA: "3"
+    Z_NIVEL: "1"
+    MIN_SOPORTE: "3"
+    MIN_LIFT: "2"
+    HORAS_RECIENTES: "24"
+    DIAS_REINCIDENCIA: "90"
+    UMBRAL_MEDIO: "30"
+    UMBRAL_ALTO: "60"
+
+package:
+  patterns:
+    - '!**'
+    - 'handler.py'
+    - 'prompts.py'
+    - 'riesgo.py'
+    - 'sql/**'
+
+plugins:
+  - serverless-step-functions
+
+functions:
+  buscarPatrones:
+    handler: handler.buscar_patrones
+    description: (Step Function) copia las fallas a BigQuery y busca combinaciones de variables que preceden fallas
+    timeout: 300
+    memorySize: 512
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  puntuarRiesgo:
+    handler: handler.puntuar_riesgo
+    description: (Step Function) calcula el puntaje de riesgo 0-100 de cada maquina y lo guarda en riesgo_falla
+    timeout: 120
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  recomendar:
+    handler: handler.recomendar
+    description: (Step Function) Gemini redacta recomendaciones de planificacion para las maquinas en riesgo (respaldo por reglas)
+    timeout: 120
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  listarRiesgo:
+    handler: handler.listar_riesgo
+    description: GET /planificacion/riesgo - ranking de maquinas con puntaje, nivel y recomendacion
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: planificacion/riesgo
+          method: get
+          cors: true
+
+stepFunctions:
+  stateMachines:
+    planificacion:
+      id: PlanificacionStateMachine
+      name: planificacion-${sls:stage}
+      type: STANDARD
+      role: arn:aws:iam::${aws:accountId}:role/LabRole
+      definition:
+        Comment: Cada madrugada aprende de las fallas pasadas, puntua el riesgo de cada maquina y recomienda que programar
+        StartAt: BuscarPatrones
+        States:
+          BuscarPatrones:
+            Type: Task
+            Resource: !GetAtt BuscarPatronesLambdaFunction.Arn
+            Retry:
+              - ErrorEquals: ["States.TaskFailed"]
+                IntervalSeconds: 30
+                MaxAttempts: 2
+                BackoffRate: 2.0
+            Next: PuntuarRiesgo
+
+          PuntuarRiesgo:
+            Type: Task
+            Resource: !GetAtt PuntuarRiesgoLambdaFunction.Arn
+            Retry:
+              - ErrorEquals: ["States.TaskFailed"]
+                IntervalSeconds: 15
+                MaxAttempts: 2
+                BackoffRate: 2.0
+            Next: HayMaquinasEnRiesgo
+
+          HayMaquinasEnRiesgo:
+            Type: Choice
+            Choices:
+              - Variable: $.cantidad
+                NumericGreaterThan: 0
+                Next: Recomendar
+            Default: SinRiesgo
+
+          Recomendar:
+            Type: Task
+            Resource: !GetAtt RecomendarLambdaFunction.Arn
+            End: true
+
+          SinRiesgo:
+            Type: Pass
+            Result: "Ninguna maquina tiene riesgo medio o alto hoy"
+            End: true
+
+resources:
+  Resources:
+    TablaRiesgoFalla:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: arquifusion-${sls:stage}-riesgo_falla
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: maquina_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: maquina_id
+            KeyType: HASH
+
+    SchedulePlanificacion:
+      Type: AWS::Scheduler::Schedule
+      Properties:
+        Name: planificacion-diaria-${sls:stage}
+        Description: Dispara la Step Function planificacion cada madrugada (05:30 hora de Peru)
+        ScheduleExpression: cron(30 5 * * ? *)
+        ScheduleExpressionTimezone: America/Lima
+        State: ENABLED
+        FlexibleTimeWindow:
+          Mode: "OFF"
+        Target:
+          Arn: !Ref PlanificacionStateMachine
+          RoleArn: arn:aws:iam::${aws:accountId}:role/LabRole
+          Input: "{}"
+
+  Outputs:
+    TablaRiesgoFalla:
+      Value: !Ref TablaRiesgoFalla
