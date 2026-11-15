@@ -42,6 +42,22 @@ plugins:
   - serverless-step-functions
 
 functions:
+  iniciar:
+    handler: handler.iniciar
+    description: Recibe AlertaCreada, OrdenCreada y OrdenCerrada del bus e inicia la Step Function comunicacion
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    environment:
+      STATE_MACHINE_ARN: !Ref ComunicacionStateMachine
+    events:
+      - eventBridge:
+          eventBus: ${cf:${self:custom.nucleoStack}.BusArn}
+          pattern:
+            detail-type:
+              - ${self:custom.eventoAlertaCreada}
+              - ${self:custom.eventoOrdenCreada}
+              - ${self:custom.eventoOrdenCerrada}
+
   clasificar:
     handler: handler.clasificar
     layers:
@@ -80,16 +96,9 @@ functions:
 stepFunctions:
   stateMachines:
     comunicacion:
-      name: comunicacion
+      id: ComunicacionStateMachine
+      name: comunicacion-${sls:stage}
       role: arn:aws:iam::${aws:accountId}:role/LabRole
-      events:
-        - eventBridge:
-            eventBus: ${cf:${self:custom.nucleoStack}.BusArn}
-            pattern:
-              detail-type:
-                - ${self:custom.eventoAlertaCreada}
-                - ${self:custom.eventoOrdenCreada}
-                - ${self:custom.eventoOrdenCerrada}
       definition:
         StartAt: Clasificar
         States:

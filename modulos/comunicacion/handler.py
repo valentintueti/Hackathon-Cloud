@@ -9,6 +9,7 @@ import plantillas
 from comun.ddb import a_dynamo, actualizar, tabla
 
 sns = boto3.client("sns")
+sfn = boto3.client("stepfunctions")
 
 TOPICS_POR_ROL = {
     "operador": os.environ.get("TOPIC_OPERADOR"),
@@ -27,6 +28,14 @@ EVENTO_ALERTA_CREADA = os.environ.get("EVENTO_ALERTA_CREADA", "AlertaCreada")
 EVENTO_ORDEN_CREADA = os.environ.get("EVENTO_ORDEN_CREADA", "OrdenCreada")
 EVENTO_ORDEN_CERRADA = os.environ.get("EVENTO_ORDEN_CERRADA", "OrdenCerrada")
 TIEMPO_LIMITE_CONFIRMACION_SEGUNDOS = int(os.environ.get("TIEMPO_LIMITE_CONFIRMACION_SEGUNDOS", 900))
+
+
+def iniciar(event, context):
+    respuesta = sfn.start_execution(
+        stateMachineArn=os.environ["STATE_MACHINE_ARN"],
+        input=json.dumps(event, default=str),
+    )
+    return {"executionArn": respuesta["executionArn"]}
 
 
 def clasificar(event, context):
@@ -57,7 +66,7 @@ def enviar(event, context):
     notificaciones = tabla("TABLA_NOTIFICACION")
     ahora = datetime.now(timezone.utc).isoformat()
     incidente_ref = paquete.get("incidenteRef", {})
-    maquina_id = incidente_ref.get("maquinaId", "desconocida")
+    maquina_id = incidente_ref.get("maquinaId") or "desconocida"
 
     roles_a_notificar = list(paquete.get("rolesInformativos", []))
     rol_principal = paquete.get("rolPrincipal")
@@ -225,7 +234,9 @@ def _clasificar_alerta(detalle):
 
 
 def _clasificar_orden_creada(detalle):
-    prioridad = detalle.get("prioridad", "media")
+    prioridad = detalle.get("prioridad") or (
+        "alta" if detalle.get("severidad") in ("alta", "critica") else detalle.get("severidad", "media")
+    )
     maquina_id = detalle.get("maquina_id")
     orden_id = detalle.get("orden_id")
     incidente_ref = {"tipo": "orden", "refId": orden_id, "maquinaId": maquina_id}

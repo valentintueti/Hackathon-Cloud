@@ -135,6 +135,8 @@ resources:
             AttributeType: S
           - AttributeName: ts
             AttributeType: S
+          - AttributeName: zona_id
+            AttributeType: S
         KeySchema:
           - AttributeName: alerta_id
             KeyType: HASH
@@ -142,6 +144,14 @@ resources:
           - IndexName: por_maquina
             KeySchema:
               - AttributeName: maquina_id
+                KeyType: HASH
+              - AttributeName: ts
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+          - IndexName: por_zona
+            KeySchema:
+              - AttributeName: zona_id
                 KeyType: HASH
               - AttributeName: ts
                 KeyType: RANGE

@@ -1,0 +1,14 @@
+.serverless/
+node_modules/
+package-lock.json
+
+__pycache__/
+*.pyc
+.venv/
+
+nucleo/layer/python/*
+!nucleo/layer/python/comun/
+
+secreto.json
+*.pem
+.env

@@ -32,16 +32,16 @@ def listar(event, context):
 
     resultado = []
     for m in todas:
-        m["estado"] = _estado_efectivo(m)
+        m["estado_visible"] = _estado_efectivo(m)
         if (zona is not None and m.get("zona_id")!=zona):
             continue
-        if (estado is not None and m.get("estado")!=estado):
+        if (estado is not None and m.get("estado_visible")!=estado):
             continue
         resultado.append(m)
     return _http(200, {"cantidad": len(resultado), "maquinas": resultado})
 
 def _estado_efectivo(m):
-    ts = m.get("ultima_lectura_ts")
+    ts = m.get("ultima_recepcion_ts") or m.get("ultima_lectura_ts")
     if not ts:
         return "sin_senal"
     ultima = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
@@ -97,7 +97,7 @@ def cercanas(event, context):
         d = _haversine_km(lat, lon, float(m["lat"]), float(m["lon"]))
         if d <= radio:
             m["distancia_km"] = round(d, 2)
-            m["estado"] = _estado_efectivo(m)
+            m["estado_visible"] = _estado_efectivo(m)
             resultado.append(m)
 
     resultado.sort(key=lambda x: x["distancia_km"])

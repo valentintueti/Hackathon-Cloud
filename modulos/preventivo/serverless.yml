@@ -67,7 +67,8 @@ functions:
 stepFunctions:
   stateMachines:
     preventivo:
-      name: preventivo
+      id: PreventivoStateMachine
+      name: preventivo-${sls:stage}
       role: arn:aws:iam::${aws:accountId}:role/LabRole
       definition:
         StartAt: CalcularIndice
@@ -106,18 +107,20 @@ resources:
     TopicMantenimientoPreventivo:
       Type: AWS::SNS::Topic
       Properties:
-        TopicName: mantenimiento-preventivo
+        TopicName: mantenimiento-preventivo-${sls:stage}
 
     ScheduleEjecucionDiariaPreventivo:
       Type: AWS::Scheduler::Schedule
       Properties:
         Name: preventivo-ejecucion-diaria-${sls:stage}
-        Description: Dispara la Step Function preventivo una vez al dia (06:00 UTC)
+        Description: Dispara la Step Function preventivo una vez al dia (06:00 hora de Peru)
         ScheduleExpression: cron(0 6 * * ? *)
+        ScheduleExpressionTimezone: America/Lima
+        State: ENABLED
         FlexibleTimeWindow:
           Mode: "OFF"
         Target:
-          Arn: !Sub "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:preventivo"
+          Arn: !Ref PreventivoStateMachine
           RoleArn: arn:aws:iam::${aws:accountId}:role/LabRole
           Input: "{}"
 

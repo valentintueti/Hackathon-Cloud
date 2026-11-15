@@ -1,6 +1,7 @@
 import json
 import uuid
 from collections import defaultdict
+from datetime import datetime, timezone
 
 import boto3
 
@@ -44,7 +45,11 @@ def handler(event, context):
 
 
 def actualizar_estado(lectura):
-    campos = {"ultima_lectura": lectura, "ultima_lectura_ts": lectura["ts"]}
+    campos = {
+        "ultima_lectura": lectura,
+        "ultima_lectura_ts": lectura["ts"],
+        "ultima_recepcion_ts": datetime.now(timezone.utc).isoformat(),
+    }
     for origen, destino in CAMPOS_DE_ESTADO.items():
         if lectura.get(origen) is not None:
             campos[destino] = lectura[origen]

@@ -42,6 +42,8 @@ def avanzar(event, context):
         return _http(404, {"error": "Incidente no encontrado"})
 
     nuevo = datos.get("estado")
+    if orden.get("tipo") == "preventivo" and nuevo == "hecha":
+        return _http(409, {"error": "Las órdenes preventivas se completan con POST /ordenes/{orden_id}/completar del módulo preventivo"})
     if not logica.transicion_valida(orden.get("estado"), nuevo):
         esperado = logica.TRANSICIONES.get(orden.get("estado"))
         return _http(409, {"error": f"De '{orden.get('estado')}' solo se puede pasar a '{esperado}'"})
@@ -53,8 +55,7 @@ def avanzar(event, context):
     actualizar(ordenes, clave={"orden_id": orden_id}, campos=campos)
 
     if orden.get("token_pendiente") and orden.get("etapa_esperada") == nuevo:
-        sfn.send_task_success(taskToken=orden["token_pendiente"], output=json.dumps({"estado": nuevo}))
-        actualizar(ordenes, clave={"orden_id": orden_id}, campos={"token_pendiente": None, "etapa_esperada": None})
+        _reanudar(orden_id, orden["token_pendiente"], nuevo)
 
     return _http(200, {"orden_id": orden_id, "estado": nuevo})
 
@@ -75,7 +76,28 @@ def guardar_token(event, context):
         clave={"orden_id": event["orden_id"]},
         campos={"token_pendiente": event["token"], "etapa_esperada": event["etapa"]},
     )
+    orden = ordenes.get_item(Key={"orden_id": event["orden_id"]}).get("Item", {})
+    estado = orden.get("estado")
+    if estado in logica.ESTADOS and logica.ESTADOS.index(estado) >= logica.ESTADOS.index(event["etapa"]):
+        _reanudar(event["orden_id"], event["token"], event["etapa"])
     return {"esperando": event["etapa"]}
+
+
+def _reanudar(orden_id, token, etapa):
+    try:
+        actualizar(
+            ordenes,
+            clave={"orden_id": orden_id},
+            campos={"token_pendiente": None, "etapa_esperada": None},
+            condicion="#token_pendiente = :token_usado",
+            valores_extra={":token_usado": token},
+        )
+    except ordenes.meta.client.exceptions.ConditionalCheckFailedException:
+        return
+    try:
+        sfn.send_task_success(taskToken=token, output=json.dumps({"estado": etapa}))
+    except (sfn.exceptions.TaskTimedOut, sfn.exceptions.InvalidToken, sfn.exceptions.TaskDoesNotExist) as error:
+        print(f"No se pudo reanudar la orden {orden_id} ({etapa}): {error}")
 
 
 def cerrar(event, context):
@@ -89,6 +111,8 @@ def cerrar(event, context):
 
 def desde_alerta(event, context):
     alerta = event["detail"]
+    if not alerta.get("maquina_id"):
+        return {"omitida": "alerta sin maquina_id"}
     datos = {
         "maquina_id": alerta["maquina_id"],
         "descripcion": f"Alerta automática: {', '.join(alerta.get('variables_afectadas', [])) or alerta.get('tipo', 'anomalía')}",

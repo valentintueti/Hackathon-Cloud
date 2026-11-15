@@ -21,7 +21,8 @@ ORDEN_SEVERIDAD = {"normal": 0, "baja": 1, "media": 2, "alta": 3, "critica": 4}
 
 
 def debe_evaluar(lectura):
-    return lectura.get("estado") != "detenida" and (lectura.get("rpm") or 0) > 0
+    rpm = lectura.get("rpm")
+    return lectura.get("estado") != "detenida" and (rpm is None or rpm > 0)
 
 
 def desviacion(valor, normal, limite):

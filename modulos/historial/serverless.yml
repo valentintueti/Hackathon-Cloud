@@ -96,6 +96,8 @@ functions:
               severidad:
                 - alta
                 - critica
+              maquina_id:
+                - exists: true
 
 stepFunctions:
   stateMachines:
