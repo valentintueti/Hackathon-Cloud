@@ -52,7 +52,7 @@ functions:
             detail-type:
               - LecturasProcesadas
 
-    registrarAlerta:
+  registrarAlerta:
     handler: handler.registrar_alerta
     description: (Step Function) guarda la alerta con explicacion de Gemini y arma el mensaje
     timeout: 30

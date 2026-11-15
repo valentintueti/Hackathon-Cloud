@@ -252,7 +252,7 @@ def _clasificar_orden_creada(detalle):
         roles_informativos.append("jefe-mantenimiento")
 
     roles_mensaje = set(roles_informativos + ([rol_principal] if rol_principal else []))
-    mensajes, redactado_por = _redactar("alerta", severidad, detalle, roles_mensaje)
+    mensajes, redactado_por = _redactar("orden_creada", prioridad, detalle, roles_mensaje)
 
     return {
         "rolesInformativos": roles_informativos,
@@ -273,11 +273,11 @@ def _clasificar_orden_cerrada(detalle):
     incidente_ref = {"tipo": "orden", "refId": orden_id, "maquinaId": maquina_id}
 
     roles_informativos = ["jefe-mantenimiento", "supervisor"]
-    mensajes, redactado_por = _redactar("alerta", severidad, detalle, roles_mensaje)
+    mensajes, redactado_por = _redactar("orden_cerrada", "informativa", detalle, set(roles_informativos))
 
     return {
         "rolesInformativos": roles_informativos,
-        "rolPrincipal": rol_principal,
+        "rolPrincipal": None,
         "mensajes": mensajes,
         "redactadoPor": redactado_por,
         "requiereConfirmacion": False,

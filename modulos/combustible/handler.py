@@ -14,6 +14,7 @@ events = boto3.client("events")
 alertas = tabla("TABLA_ALERTA")
 
 RUTA_SQL = os.path.join(os.path.dirname(__file__), "sql", "combustible.sql")
+MAQUINAS_POR_LLAMADA = 10
 
 METRICAS = (
     "unidad", "consumo_ayer", "media_propia", "z_propio", "pct_propio",
@@ -39,9 +40,12 @@ def analizar(event, context):
 
 def explicar_causas(event, context):
     sospechosas = event["sospechosas"]
-    respuesta = ia.generar_json(prompts.construir(sospechosas), prompts.SISTEMA, max_tokens=2000)
-    if not isinstance(respuesta, dict):
-        respuesta = {}
+    respuesta = {}
+    for i in range(0, len(sospechosas), MAQUINAS_POR_LLAMADA):
+        grupo = sospechosas[i:i + MAQUINAS_POR_LLAMADA]
+        parcial = ia.generar_json(prompts.construir(grupo), prompts.SISTEMA, max_tokens=2000)
+        if isinstance(parcial, dict):
+            respuesta.update(parcial)
 
     de_ia = 0
     for s in sospechosas:

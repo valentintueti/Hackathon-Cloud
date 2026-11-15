@@ -15,17 +15,20 @@ def _llamar(prompt, instrucciones=None, json_salida=False, temperatura=0.3, max_
         print("Gemini sin configurar: falta gemini_api_key en el secreto")
         return None
 
+    modelo = s.get("gemini_modelo") or MODELO_DEFECTO
     cuerpo = {
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": temperatura, "maxOutputTokens": max_tokens},
     }
+    if "2.5" in modelo:
+        cuerpo["generationConfig"]["thinkingConfig"] = {"thinkingBudget": 0}
     if instrucciones:
         cuerpo["systemInstruction"] = {"parts": [{"text": instrucciones}]}
     if json_salida:
         cuerpo["generationConfig"]["responseMimeType"] = "application/json"
 
     peticion = urllib.request.Request(
-        URL.format(modelo=s.get("gemini_modelo") or MODELO_DEFECTO),
+        URL.format(modelo=modelo),
         data=json.dumps(cuerpo).encode("utf-8"),
         headers={"Content-Type": "application/json", "x-goog-api-key": clave},
         method="POST",
@@ -33,7 +36,12 @@ def _llamar(prompt, instrucciones=None, json_salida=False, temperatura=0.3, max_
     try:
         with urllib.request.urlopen(peticion, timeout=timeout) as respuesta:
             datos = json.loads(respuesta.read())
-        return datos["candidates"][0]["content"]["parts"][0]["text"].strip()
+        candidato = datos["candidates"][0]
+        texto = "".join(p.get("text", "") for p in candidato.get("content", {}).get("parts", []) if not p.get("thought"))
+        if not texto.strip():
+            print(f"Gemini no devolvio texto (finishReason {candidato.get('finishReason')})")
+            return None
+        return texto.strip()
     except urllib.error.HTTPError as error:
         print(f"Gemini respondio {error.code}: {error.read()[:300]}")
     except Exception as error:
