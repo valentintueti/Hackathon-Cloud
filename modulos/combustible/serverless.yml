@@ -1,0 +1,126 @@
+org: valentintuesta
+service: arquifusion-combustible
+frameworkVersion: '4'
+
+custom:
+  nucleoStack: arquifusion-nucleo-${sls:stage}
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 29
+  logRetentionInDays: 14
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  environment:
+    STAGE: ${sls:stage}
+    TABLA_ALERTA: ${cf:${self:custom.nucleoStack}.TablaAlerta}
+    BUS: ${cf:${self:custom.nucleoStack}.BusName}
+    SECRET_NAME: arquifusion/${sls:stage}/config
+    DIAS_HISTORIA: "14"
+    DIAS_TENDENCIA: "7"
+    Z_UMBRAL: "3"
+    PCT_PROPIO: "30"
+    PCT_MODELO: "20"
+    MIN_MAQUINAS_MODELO: "3"
+    R_TENDENCIA: "0.8"
+
+package:
+  patterns:
+    - '!**'
+    - 'handler.py'
+    - 'prompts.py'
+    - 'sql/**'
+
+plugins:
+  - serverless-step-functions
+
+functions:
+  analizar:
+    handler: handler.analizar
+    description: (Step Function) calcula en BigQuery los 3 casos de consumo anomalo y devuelve las maquinas sospechosas
+    timeout: 120
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+  
+  explicarCausas:
+    handler: handler.explicar_causas
+    description: (Step Function) llama a Gemini y redacta la posible causa de cada consumo anomalo (respaldado por reglas)
+    timeout: 60
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+  
+  guardarAlertas:
+    handler: handler.guardar_alertas
+    description: (Step Function) registra una alerta por maquina sospechosa y publica AlertaCreada en el bus
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+stepFunctions:
+  stateMachines:
+    combustible:
+      id: CombustibleStateMachine
+      name: combustible-${sls:stage}
+      type: STANDARD
+      role: arn:aws:iam::${aws:accountId}:role/LabRole
+      definition:
+        Comment: Cada manana revisa el consumo de combustible de la flota y alerta los casos anomalos
+        StartAt: Analizar
+        States:
+          Analizar:
+            Type: Task
+            Resource: !GetAtt AnalizarLambdaFunction.Arn
+            Retry:
+              - ErrorEquals: ["States.TaskFailed"]
+                IntervalSeconds: 30
+                MaxAttempts: 2
+                BackoffRate: 2.0
+            Next: HaySospechosas
+
+          HaySospechosas:
+            Type: Choice
+            Choices:
+              - Variable: $.cantidad
+                NumericGreaterThan: 0
+                Next: ExplicarCausas
+            Default: SinSospechosas
+
+          ExplicarCausas:
+            Type: Task
+            Resource: !GetAtt ExplicarCausasLambdaFunction.Arn
+            Next: GuardarAlertas
+
+          GuardarAlertas:
+            Type: Task
+            Resource: !GetAtt GuardarAlertasLambdaFunction.Arn
+            Retry:
+              - ErrorEquals: ["States.TaskFailed"]
+                IntervalSeconds: 10
+                MaxAttempts: 2
+                BackoffRate: 2.0
+            End: true
+
+          SinSospechosas:
+            Type: Pass
+            Result: "Ninguna maquina tuvo un consumo de combustible anomalo"
+            End: true
+
+resources:
+  Resources:
+    ScheduleCombustible:
+      Type: AWS::Scheduler::Schedule
+      Properties:
+        Name: combustible-diario-${sls:stage}
+        Description: Dispara la Step Function combustible cada manana (06:30 hora de Peru)
+        ScheduleExpression: cron(30 6 * * ? *)
+        ScheduleExpressionTimezone: America/Lima
+        State: ENABLED
+        FlexibleTimeWindow:
+          Mode: "OFF"
+        Target:
+          Arn: !Ref CombustibleStateMachine
+          RoleArn: arn:aws:iam::${aws:accountId}:role/LabRole
+          Input: "{}"
