@@ -63,6 +63,17 @@ functions:
     layers:
       - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
 
+  listarEventos:
+    handler: handler.listar_eventos
+    description: GET /masivos/eventos - eventos masivos (filtros zona y estado abierto o cerrado)
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: masivos/eventos
+          method: get
+          cors: true
+
 stepFunctions:
   stateMachines:
     masivos:

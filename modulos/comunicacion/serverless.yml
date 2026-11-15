@@ -95,6 +95,28 @@ functions:
           method: post
           cors: true
 
+  listarDestinatarios:
+    handler: handler.listar_destinatarios
+    description: GET /destinatarios - personas registradas por rol
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: destinatarios
+          method: get
+          cors: true
+
+  listarNotificaciones:
+    handler: handler.listar_notificaciones
+    description: GET /notificaciones - avisos enviados (pendientes=true para los que esperan confirmacion)
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: notificaciones
+          method: get
+          cors: true
+
 stepFunctions:
   stateMachines:
     comunicacion:

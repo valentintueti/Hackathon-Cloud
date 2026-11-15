@@ -8,7 +8,7 @@ import boto3
 import plantillas
 import prompts
 from comun import ia
-from comun.ddb import a_dynamo, actualizar, tabla
+from comun.ddb import a_dynamo, a_json, actualizar, tabla
 
 sns = boto3.client("sns")
 sfn = boto3.client("stepfunctions")
@@ -173,6 +173,40 @@ def confirmar(event, context):
     return _respuesta_http(200, {"notificacionId": notificacion_id, "estado": "confirmada"})
 
 
+def listar_notificaciones(event, context):
+    params = event.get("queryStringParameters") or {}
+    items = _escanear_todo(tabla("TABLA_NOTIFICACION"))
+    if params.get("pendientes") == "true":
+        items = [n for n in items if n.get("requiere_confirmacion") and n.get("estado") == "enviada"]
+    for campo in ("rol", "maquina_id", "estado"):
+        valor = params.get("maquina" if campo == "maquina_id" else campo)
+        if valor:
+            items = [n for n in items if n.get(campo) == valor]
+    items.sort(key=lambda n: str(n.get("ts_enviado", "")), reverse=True)
+    return _respuesta_http(200, {"cantidad": len(items), "notificaciones": items[:200]})
+
+
+def listar_destinatarios(event, context):
+    params = event.get("queryStringParameters") or {}
+    items = _escanear_todo(tabla("TABLA_DESTINATARIO"))
+    if params.get("rol"):
+        items = [d for d in items if d.get("rol") == params["rol"]]
+    for d in items:
+        d.pop("suscripcion_arn", None)
+    items.sort(key=lambda d: (d.get("rol", ""), d.get("nombre", "")))
+    return _respuesta_http(200, {"cantidad": len(items), "destinatarios": items})
+
+
+def _escanear_todo(tabla_ddb):
+    items = []
+    respuesta = tabla_ddb.scan()
+    items.extend(respuesta.get("Items", []))
+    while "LastEvaluatedKey" in respuesta:
+        respuesta = tabla_ddb.scan(ExclusiveStartKey=respuesta["LastEvaluatedKey"])
+        items.extend(respuesta.get("Items", []))
+    return items
+
+
 def registrar_destinatario(event, context):
     try:
         cuerpo = json.loads(event.get("body") or "{}")
@@ -309,5 +343,5 @@ def _respuesta_http(codigo, cuerpo):
     return {
         "statusCode": codigo,
         "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
-        "body": json.dumps(cuerpo, ensure_ascii=False),
+        "body": a_json(cuerpo),
     }

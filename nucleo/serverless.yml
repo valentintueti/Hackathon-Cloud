@@ -54,6 +54,28 @@ functions:
           method: post
           cors: true
 
+  listarAlertas:
+    handler: handlers/consultas.listar_alertas
+    description: GET /alertas - alertas de todos los modulos (filtros origen, zona, maquina, severidad, estado, desde, limite)
+    layers:
+      - !Ref ComunLambdaLayer
+    events:
+      - http:
+          path: alertas
+          method: get
+          cors: true
+
+  listarOrdenes:
+    handler: handlers/consultas.listar_ordenes
+    description: GET /ordenes - ordenes de trabajo (filtros tipo, estado o abiertas, maquina, limite)
+    layers:
+      - !Ref ComunLambdaLayer
+    events:
+      - http:
+          path: ordenes
+          method: get
+          cors: true
+
   ingesta:
     handler: handlers/ingesta.handler
     description: Procesa lotes de SQS - estado en DynamoDB, historico en S3, evento LecturasProcesadas

@@ -70,6 +70,50 @@ functions:
     layers:
       - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
 
+  listarInventario:
+    handler: handler.listar_inventario
+    description: GET /repuestos/inventario - stock por zona con punto de reorden y clasificacion
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: repuestos/inventario
+          method: get
+          cors: true
+
+  ingresarStock:
+    handler: handler.ingresar_stock
+    description: POST /repuestos/inventario - suma piezas que llegaron (cantidad) o fija un conteo (stock_actual)
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: repuestos/inventario
+          method: post
+          cors: true
+
+  listarComponentes:
+    handler: handler.listar_componentes
+    description: GET /repuestos/componentes - catalogo de componentes
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: repuestos/componentes
+          method: get
+          cors: true
+
+  registrarComponente:
+    handler: handler.registrar_componente
+    description: POST /repuestos/componentes - agrega o actualiza componentes del catalogo
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: repuestos/componentes
+          method: post
+          cors: true
+
 stepFunctions:
   stateMachines:
     repuestos:

@@ -176,6 +176,89 @@ def avisar_stock_bajo(event, context):
     print(f"Aviso enviado: {len(piezas)} piezas en {zonas}")
     return {"notificadas": len(piezas), "zonas": zonas}
 
+def listar_inventario(event, context):
+    params = event.get("queryStringParameters") or {}
+    if params.get("zona"):
+        filas = _consultar_todo(inventarios, KeyConditionExpression=Key("zona_id").eq(params["zona"]))
+    else:
+        filas = _escanear_todo(inventarios)
+    catalogo = {c["componente_id"]: c for c in _escanear_todo(componentes)}
+    for f in filas:
+        f["nombre"] = catalogo.get(f["componente_id"], {}).get("nombre")
+        punto = f.get("punto_reorden")
+        f["bajo_reorden"] = punto is not None and f.get("stock_actual", 0) < punto
+    if params.get("bajo_reorden") == "true":
+        filas = [f for f in filas if f["bajo_reorden"]]
+    filas.sort(key=lambda f: (f["zona_id"], f["componente_id"]))
+    return _http(200, {"cantidad": len(filas), "inventario": filas})
+
+def ingresar_stock(event, context):
+    try:
+        datos = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _http(400, {"error": "El cuerpo no es JSON valido"})
+
+    piezas = datos if isinstance(datos, list) else [datos]
+    guardados, errores = [], []
+    for i, p in enumerate(piezas):
+        if not p.get("zona_id") or not p.get("componente_id"):
+            errores.append({"indice": i, "error": "faltan zona_id o componente_id"})
+            continue
+        clave = {"zona_id": str(p["zona_id"]), "componente_id": str(p["componente_id"])}
+        try:
+            if p.get("stock_actual") is not None:
+                valor = int(p["stock_actual"])
+                expresion = "SET stock_actual = :valor"
+            else:
+                valor = int(p.get("cantidad", 0))
+                expresion = "SET stock_actual = if_not_exists(stock_actual, :cero) + :valor"
+        except (TypeError, ValueError):
+            valor = -1
+        if valor < 0 or (p.get("stock_actual") is None and valor == 0):
+            errores.append({"indice": i, "error": "envia cantidad (ingreso mayor a 0) o stock_actual (conteo, 0 o mas)"})
+            continue
+        valores = {":valor": valor, ":ahora": _ahora()}
+        if "if_not_exists" in expresion:
+            valores[":cero"] = 0
+        respuesta = inventarios.update_item(
+            Key=clave,
+            UpdateExpression=expresion + ", ultimo_ingreso_ts = :ahora",
+            ExpressionAttributeValues=valores,
+            ReturnValues="ALL_NEW",
+        )
+        guardados.append(respuesta["Attributes"])
+
+    return _http(200 if guardados else 400, {"guardados": guardados, "errores": errores})
+
+def listar_componentes(event, context):
+    lista = sorted(_escanear_todo(componentes), key=lambda c: c["componente_id"])
+    return _http(200, {"cantidad": len(lista), "componentes": lista})
+
+def registrar_componente(event, context):
+    try:
+        datos = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _http(400, {"error": "El cuerpo no es JSON valido"})
+
+    piezas = datos if isinstance(datos, list) else [datos]
+    guardados, errores = [], []
+    for i, p in enumerate(piezas):
+        componente_id = str(p.get("componente_id") or "").strip()
+        if not componente_id or not p.get("nombre"):
+            errores.append({"indice": i, "error": "faltan componente_id o nombre"})
+            continue
+        item = {
+            "componente_id": componente_id,
+            "nombre": p["nombre"],
+            "categoria": p.get("categoria"),
+            "dias_reposicion": p.get("dias_reposicion"),
+            "costo": p.get("costo"),
+        }
+        componentes.put_item(Item=a_dynamo({k: v for k, v in item.items() if v is not None}))
+        guardados.append(item)
+
+    return _http(201 if guardados else 400, {"guardados": guardados, "errores": errores})
+
 def _escanear_todo(tabla_ddb):
     items = []
     respuesta = tabla_ddb.scan()

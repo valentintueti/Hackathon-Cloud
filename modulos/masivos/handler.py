@@ -120,6 +120,28 @@ def registrar_evento(event, context):
     print(f"Evento masivo creado en {zona_id}: {evento['evento_id']}")
     return {"evento_id": evento["evento_id"], "accion": "creado", "alerta_id": alerta["alerta_id"]}
 
+def listar_eventos(event, context):
+    params = event.get("queryStringParameters") or {}
+    zona_id, estado = params.get("zona"), params.get("estado")
+    if zona_id and estado:
+        items = _consultar_todo(
+            eventos,
+            IndexName="por_zona_estado",
+            KeyConditionExpression=Key("zona_id").eq(zona_id) & Key("estado").eq(estado),
+        )
+    else:
+        items = _escanear_todo(eventos)
+        if zona_id:
+            items = [e for e in items if e.get("zona_id") == zona_id]
+        if estado:
+            items = [e for e in items if e.get("estado") == estado]
+    items.sort(key=lambda e: str(e.get("ts_actualizado", "")), reverse=True)
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"},
+        "body": a_json({"cantidad": len(items), "eventos": items[:100]}),
+    }
+
 def _escanear_todo(tabla_ddb):
     items = []
     respuesta = tabla_ddb.scan()
