@@ -1,0 +1,168 @@
+org: valentintuesta
+service: arquifusion-masivos
+frameworkVersion: '4'
+
+custom:
+  nucleoStack: arquifusion-nucleo-${sls:stage}
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 29
+  logRetentionInDays: 14
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  environment:
+    STAGE: ${sls:stage}
+    TABLA_MAQUINA: ${cf:${self:custom.nucleoStack}.TablaMaquina}
+    TABLA_ZONA: ${cf:${self:custom.nucleoStack}.TablaZona}
+    TABLA_ALERTA: ${cf:${self:custom.nucleoStack}.TablaAlerta}
+    TABLA_ORDEN_TRABAJO: ${cf:${self:custom.nucleoStack}.TablaOrdenTrabajo}
+    TABLA_EVENTO_MASIVO: !Ref TablaEventoMasivo
+    BUS: ${cf:${self:custom.nucleoStack}.BusName}
+    SECRET_NAME: arquifusion/${sls:stage}/config
+    MIN_MAQUINAS: "3"
+    VENTANA_MINUTOS: "30"
+    MINUTOS_BIGQUERY: "180"
+    DIAS_HISTORIA: "14"
+    Z_UMBRAL: "3"
+    DIAS_COMPONENTES: "30"
+
+package:
+  patterns:
+    - '!**'
+    - 'handler.py'
+    - 'correlacion.py'
+    - 'sql/**'
+
+plugins:
+  - serverless-step-functions
+
+functions:
+  detectarGrupos:
+    handler: handler.detectar_grupos
+    description: (Step Function) busca zonas con N o mas maquinas afectadas en la ventana
+    timeout: 60
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+  
+  analizarFactores:
+    handler: handler.analizar_factores
+    description: (Step Function) busca que tienen en comun las maquinas del grupo (modelo, zona, BigQuery, componentes)
+    timeout: 120
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  registrarEvento:
+    handler: handler.registrar_evento
+    description: (Step Function) crea o actualiza el evento masivo, registra la alerta masiva y publica AlertaCreada
+    timeout: 60
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+stepFunctions:
+  stateMachines:
+    masivos:
+      id: MasivosStateMachine
+      name: masivos-${sls:stage}
+      type: STANDARD
+      role: arn:aws:iam::${aws:accountId}:role/LabRole
+      definition:
+        Comment: Cada 10 minutos detecta grupos de maquinas afectadas por zona y registra el evento masivo
+        StartAt: DetectarGrupos
+        States:
+          DetectarGrupos:
+            Type: Task
+            Resource: !GetAtt DetectarGruposLambdaFunction.Arn
+            Retry:
+              - ErrorEquals: ["States.TaskFailed"]
+                IntervalSeconds: 10
+                MaxAttempts: 2
+                BackoffRate: 2.0
+            Next: HayGrupos
+
+          HayGrupos:
+            Type: Choice
+            Choices:
+              - Variable: $.cantidad
+                NumericGreaterThan: 0
+                Next: ProcesarGrupos
+            Default: SinGrupos
+
+          ProcesarGrupos:
+            Type: Map
+            ItemsPath: $.grupos
+            MaxConcurrency: 2
+            Iterator:
+              StartAt: AnalizarFactores
+              States:
+                AnalizarFactores:
+                  Type: Task
+                  Resource: !GetAtt AnalizarFactoresLambdaFunction.Arn
+                  Retry:
+                    - ErrorEquals: ["States.TaskFailed"]
+                      IntervalSeconds: 15
+                      MaxAttempts: 2
+                      BackoffRate: 2.0
+                  Next: RegistrarEvento
+                RegistrarEvento:
+                  Type: Task
+                  Resource: !GetAtt RegistrarEventoLambdaFunction.Arn
+                  End: true
+            End: true
+
+          SinGrupos:
+            Type: Pass
+            Result: "No hay grupos de maquinas afectadas en ninguna zona"
+            End: true
+
+resources:
+  Resources:
+    TablaEventoMasivo:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: arquifusion-${sls:stage}-evento_masivo
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: evento_id
+            AttributeType: S
+          - AttributeName: zona_id
+            AttributeType: S
+          - AttributeName: estado
+            AttributeType: S
+        KeySchema:
+          - AttributeName: evento_id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: por_zona_estado
+            KeySchema:
+              - AttributeName: zona_id
+                KeyType: HASH
+              - AttributeName: estado
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+
+    ScheduleMasivos:
+      Type: AWS::Scheduler::Schedule
+      Properties:
+        Name: masivos-cada-10-min-${sls:stage}
+        Description: Dispara la Step Function masivos cada 10 minutos
+        ScheduleExpression: rate(10 minutes)
+        ScheduleExpressionTimezone: America/Lima
+        State: ENABLED
+        FlexibleTimeWindow:
+          Mode: "OFF"
+        Target:
+          Arn: !Ref MasivosStateMachine
+          RoleArn: arn:aws:iam::${aws:accountId}:role/LabRole
+          Input: "{}"
+
+  Outputs:
+    TablaEventoMasivo:
+      Value: !Ref TablaEventoMasivo
