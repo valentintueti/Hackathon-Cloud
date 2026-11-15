@@ -27,6 +27,7 @@ package:
     - '!**'
     - 'handler.py'
     - 'logica.py'
+    - 'prompts.py'
 
 plugins:
   - serverless-step-functions
@@ -75,7 +76,8 @@ functions:
 
   cerrar:
     handler: handler.cerrar
-    description: (Step Function) calcula tiempos del incidente y publica OrdenCerrada
+    description: (Step Function) calcula tiempos, resume el historial con Gemini y publica OrdenCerrada
+    timeout: 30
     layers:
       - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
 
