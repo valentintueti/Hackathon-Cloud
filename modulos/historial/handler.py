@@ -6,6 +6,8 @@ import boto3
 from boto3.dynamodb.conditions import Key
 
 import logica
+import prompts
+from comun import ia
 from comun.config import env
 from comun.ddb import a_dynamo, a_json, actualizar, tabla
 
@@ -66,8 +68,13 @@ def historial(event, context):
     for o in lista:
         o.update({k: v for k, v in logica.tiempos(o).items() if o.get(k) is None})
         o.pop("token_pendiente", None)
-    return _http(200, {"maquina_id": maquina_id, "resumen": logica.resumen(lista), "incidentes": lista})
-
+    ultimo = next((o for o in lista if o.get("resumen_ia")), None)
+    return _http(200, {
+        "maquina_id": maquina_id,
+        "resumen": logica.resumen(lista),
+        "ultimo_resumen_ia": {k: ultimo.get(k) for k in ("orden_id", "ts_completada", "resumen_ia", "acciones_ia", "resumen_por")} if ultimo else None,
+        "incidentes": lista,
+    })
 
 
 def guardar_token(event, context):
@@ -103,9 +110,29 @@ def _reanudar(orden_id, token, etapa):
 def cerrar(event, context):
     orden = ordenes.get_item(Key={"orden_id": event["orden_id"]})["Item"]
     calculados = logica.tiempos(orden)
-    actualizar(ordenes, clave={"orden_id": event["orden_id"]}, campos=calculados)
-    _publicar("OrdenCerrada", {**orden, **calculados})
-    return {"orden_id": event["orden_id"], **calculados}
+    cerrada = {**orden, **calculados}
+
+    lista = [o for o in _ordenes_de_maquina(orden["maquina_id"]) if o["orden_id"] != orden["orden_id"]]
+    lista.insert(0, cerrada)
+    campos = {**calculados, **_resumir(cerrada, lista, logica.resumen(lista))}
+
+    actualizar(ordenes, clave={"orden_id": event["orden_id"]}, campos=campos)
+    _publicar("OrdenCerrada", {**orden, **campos})
+    return {"orden_id": event["orden_id"], **calculados, "resumen_por": campos["resumen_por"]}
+
+
+def _resumir(orden, lista, resumen):
+    previas = [_plano(o) for o in lista[1:11]]
+    respuesta = ia.generar_json(prompts.construir(_plano(orden), previas, _plano(resumen)), prompts.SISTEMA)
+    if isinstance(respuesta, dict) and isinstance(respuesta.get("resumen"), str) and respuesta["resumen"].strip():
+        acciones = respuesta.get("acciones")
+        acciones = [str(a).strip()[:200] for a in acciones if str(a).strip()][:3] if isinstance(acciones, list) else []
+        return {"resumen_ia": respuesta["resumen"].strip()[:1200], "acciones_ia": acciones, "resumen_por": "gemini"}
+    return {"resumen_ia": prompts.respaldo(resumen), "acciones_ia": [], "resumen_por": "reglas"}
+
+
+def _plano(valor):
+    return json.loads(a_json(valor))
 
 
 
