@@ -29,6 +29,7 @@ package:
     - '!**'
     - 'handler.py'
     - 'reglas.py'
+    - 'prompts.py'
 
 plugins:
   - serverless-step-functions
@@ -51,9 +52,10 @@ functions:
             detail-type:
               - LecturasProcesadas
 
-  registrarAlerta:
+    registrarAlerta:
     handler: handler.registrar_alerta
-    description: (Step Function) guarda la alerta en ALERTA y arma el mensaje
+    description: (Step Function) guarda la alerta con explicacion de Gemini y arma el mensaje
+    timeout: 30
     layers:
       - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
 
