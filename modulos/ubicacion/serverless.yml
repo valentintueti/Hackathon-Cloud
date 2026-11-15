@@ -1,0 +1,61 @@
+org: valentintuesta
+service: arquifusion-ubicacion
+frameworkVersion: '4'
+
+custom:
+  nucleoStack: arquifusion-nucleo-${sls:stage}
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 29
+  logRetentionInDays: 14
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  environment:
+    STAGE: ${sls:stage}
+    TABLA_MAQUINA: ${cf:${self:custom.nucleoStack}.TablaMaquina}
+    TABLA_ZONA: ${cf:${self:custom.nucleoStack}.TablaZona}
+    MINUTOS_SIN_SENAL: "15"
+
+package:
+  patterns:
+    - '!**'
+    - 'handler.py'
+
+functions:
+  listar:
+    handler: handler.listar
+    description: GET /ubicacion/maquinas - posicion, estado y zona (filtros zona y estado)
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: ubicacion/maquinas
+          method: get
+          cors: true
+
+  resumen:
+    handler: handler.resumen
+    description: GET /ubicacion/resumen - cantidad de maquinas por estado, total y zona
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: ubicacion/resumen
+          method: get
+          cors: true
+
+  cercanas:
+    handler: handler.cercanas
+    description: GET /ubicacion/cercanas - maquinas cercanas a un punto ordenadas por distancia
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: ubicacion/cercanas
+          method: get
+          cors: true
