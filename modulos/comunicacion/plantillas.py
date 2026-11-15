@@ -1,6 +1,9 @@
 def generar_mensajes(tipo_evento, severidad, datos, roles):
     mensajes = {}
     for rol in roles:
+        if tipo_evento == "alerta" and datos.get("tipo") == "masiva":
+            mensajes[rol] = _alerta_masiva(severidad, datos)
+            continue
         constructor = _CONSTRUCTORES.get((tipo_evento, rol), _mensaje_generico)
         mensajes[rol] = constructor(severidad, datos)
     return mensajes
@@ -8,6 +11,15 @@ def generar_mensajes(tipo_evento, severidad, datos, roles):
 
 def _mensaje_generico(severidad, datos):
     return f"Evento {severidad} en maquina {datos.get('maquina_id', datos.get('maquinaId', 'desconocida'))}"
+
+
+def _alerta_masiva(severidad, datos):
+    maquinas = ", ".join(datos.get("maquinas_afectadas", [])) or "varias maquinas"
+    return (
+        f"Incidente masivo {severidad} en la zona {datos.get('zona_id', 'desconocida')}: "
+        f"{len(datos.get('maquinas_afectadas', []))} maquinas afectadas ({maquinas}). "
+        f"{datos.get('descripcion', '')}"
+    ).strip()
 
 
 def _alerta_operador(severidad, datos):

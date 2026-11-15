@@ -189,6 +189,10 @@ def completar_orden(event, context):
     orden = ordenes_tabla.get_item(Key={"orden_id": orden_id}).get("Item")
     if not orden:
         return _respuesta_http(404, {"error": "Orden no encontrada"})
+    if orden.get("tipo") != "preventivo":
+        return _respuesta_http(409, {"error": "Solo se completan ordenes preventivas; las correctivas se cierran desde historial"})
+    if orden.get("estado") == "hecha":
+        return _respuesta_http(409, {"error": "La orden ya estaba completada"})
 
     hoy = date.today().isoformat()
     ahora = datetime.now(timezone.utc).isoformat()
@@ -199,17 +203,16 @@ def completar_orden(event, context):
         campos={"estado": "hecha", "ts_completada": ahora},
     )
 
-    if orden.get("tipo") == "preventivo":
-        maquinas_tabla = tabla("TABLA_MAQUINA")
-        actualizar(
-            maquinas_tabla,
-            clave={"maquina_id": orden["maquina_id"]},
-            campos={
-                "fecha_ult_mantenimiento": hoy,
-                "horas_efectivas_ciclo": 0,
-                "porcentaje_intervalo": 0,
-            },
-        )
+    maquinas_tabla = tabla("TABLA_MAQUINA")
+    actualizar(
+        maquinas_tabla,
+        clave={"maquina_id": orden["maquina_id"]},
+        campos={
+            "fecha_ult_mantenimiento": hoy,
+            "horas_efectivas_ciclo": 0,
+            "porcentaje_intervalo": 0,
+        },
+    )
 
     _publicar_eventos(
         "OrdenCerrada",

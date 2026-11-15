@@ -1,6 +1,7 @@
 from collections import defaultdict
 
 ESTADOS_AFECTADOS = ("detenida", "requiere_intervencion")
+SEVERIDADES_CONSIDERADAS = ("media", "alta", "critica")
 
 
 def _mas_antiguo(actual, nuevo):
@@ -11,18 +12,21 @@ def _mas_antiguo(actual, nuevo):
     return actual
 
 
-def afectadas_por_zona(alertas, maquinas):
+def afectadas_por_zona(alertas, maquinas, desde):
     por_zona = defaultdict(dict)
     for a in alertas:
         zona = a.get("zona_id")
         mid = a.get("maquina_id")
-        if not zona or not mid:
+        if not zona or not mid or a.get("severidad") not in SEVERIDADES_CONSIDERADAS:
             continue
         por_zona[zona][mid] = _mas_antiguo(por_zona[zona].get(mid), a.get("ts"))
     for m in maquinas:
         zona = m.get("zona_id")
         mid = m.get("maquina_id")
         if not zona or m.get("estado") not in ESTADOS_AFECTADOS:
+            continue
+        recepcion = m.get("ultima_recepcion_ts") or m.get("ultima_lectura_ts")
+        if not recepcion or str(recepcion) < desde:
             continue
         por_zona[zona][mid] = _mas_antiguo(por_zona[zona].get(mid), m.get("ultima_lectura_ts"))
     return por_zona

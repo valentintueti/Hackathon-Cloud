@@ -113,6 +113,13 @@ def desde_alerta(event, context):
     alerta = event["detail"]
     if not alerta.get("maquina_id"):
         return {"omitida": "alerta sin maquina_id"}
+    abierta = next(
+        (o for o in _ordenes_de_maquina(str(alerta["maquina_id"]))
+         if o.get("tipo", "correctivo") == "correctivo" and o.get("estado") != "hecha"),
+        None,
+    )
+    if abierta:
+        return {"omitida": f"la maquina ya tiene el incidente abierto {abierta['orden_id']}"}
     datos = {
         "maquina_id": alerta["maquina_id"],
         "descripcion": f"Alerta automática: {', '.join(alerta.get('variables_afectadas', [])) or alerta.get('tipo', 'anomalía')}",

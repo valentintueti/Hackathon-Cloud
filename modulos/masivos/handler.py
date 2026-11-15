@@ -33,7 +33,7 @@ def detectar_grupos(event, context):
     for zona_id in zonas_ids:
         recientes.extend(_alertas_de_zona(zona_id, desde))
 
-    por_zona = correlacion.afectadas_por_zona(recientes, todas)
+    por_zona = correlacion.afectadas_por_zona(recientes, todas, desde)
     grupos = correlacion.armar_grupos(por_zona, int(env("MIN_MAQUINAS", "3")))
 
     zonas_con_grupo = {g["zona_id"] for g in grupos}
