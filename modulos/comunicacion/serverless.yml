@@ -1,0 +1,241 @@
+org: valentintuesta
+service: arquifusion-comunicacion
+frameworkVersion: '4'
+
+custom:
+  nucleoStack: arquifusion-nucleo-${sls:stage}
+  eventoAlertaCreada: AlertaCreada
+  eventoOrdenCreada: OrdenCreada
+  eventoOrdenCerrada: OrdenCerrada
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 29
+  logRetentionInDays: 14
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  environment:
+    STAGE: ${sls:stage}
+    TABLA_DESTINATARIO: !Ref TablaDestinatario
+    TABLA_NOTIFICACION: !Ref TablaNotificacion
+    TOPIC_OPERADOR: !Ref TopicOperador
+    TOPIC_TECNICO: !Ref TopicTecnico
+    TOPIC_JEFE_MANTENIMIENTO: !Ref TopicJefeMantenimiento
+    TOPIC_SUPERVISOR: !Ref TopicSupervisor
+    TOPIC_GERENCIA: !Ref TopicGerencia
+    TIEMPO_LIMITE_CONFIRMACION_SEGUNDOS: "900"
+    EVENTO_ALERTA_CREADA: ${self:custom.eventoAlertaCreada}
+    EVENTO_ORDEN_CREADA: ${self:custom.eventoOrdenCreada}
+    EVENTO_ORDEN_CERRADA: ${self:custom.eventoOrdenCerrada}
+
+package:
+  patterns:
+    - '!**'
+    - 'handler.py'
+    - 'plantillas.py'
+
+plugins:
+  - serverless-step-functions
+
+functions:
+  clasificar:
+    handler: handler.clasificar
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  enviar:
+    handler: handler.enviar
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  verificarConfirmacion:
+    handler: handler.verificar_confirmacion
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  confirmar:
+    handler: handler.confirmar
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: notificaciones/{notificacion_id}/confirmar
+          method: post
+          cors: true
+
+  registrarDestinatario:
+    handler: handler.registrar_destinatario
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: destinatarios
+          method: post
+          cors: true
+
+stepFunctions:
+  stateMachines:
+    comunicacion:
+      name: comunicacion
+      role: arn:aws:iam::${aws:accountId}:role/LabRole
+      events:
+        - eventBridge:
+            eventBus: ${cf:${self:custom.nucleoStack}.BusArn}
+            pattern:
+              detail-type:
+                - ${self:custom.eventoAlertaCreada}
+                - ${self:custom.eventoOrdenCreada}
+                - ${self:custom.eventoOrdenCerrada}
+      definition:
+        StartAt: Clasificar
+        States:
+          Clasificar:
+            Type: Task
+            Resource: !GetAtt ClasificarLambdaFunction.Arn
+            ResultPath: "$.paquete"
+            Next: Enviar
+
+          Enviar:
+            Type: Task
+            Resource: !GetAtt EnviarLambdaFunction.Arn
+            InputPath: "$.paquete"
+            ResultPath: "$.envio"
+            Next: RequiereConfirmacion
+
+          RequiereConfirmacion:
+            Type: Choice
+            Choices:
+              - Variable: "$.envio.requiereConfirmacion"
+                BooleanEquals: true
+                Next: EsperarConfirmacion
+            Default: Fin
+
+          EsperarConfirmacion:
+            Type: Wait
+            SecondsPath: "$.envio.tiempoLimiteSegundos"
+            Next: VerificarConfirmacion
+
+          VerificarConfirmacion:
+            Type: Task
+            Resource: !GetAtt VerificarConfirmacionLambdaFunction.Arn
+            InputPath: "$.envio"
+            ResultPath: "$.verificacion"
+            Next: FueConfirmadoOHayEscalamiento
+
+          FueConfirmadoOHayEscalamiento:
+            Type: Choice
+            Choices:
+              - Variable: "$.verificacion.confirmado"
+                BooleanEquals: true
+                Next: Fin
+              - Variable: "$.verificacion.escalar"
+                BooleanEquals: true
+                Next: EnviarEscalado
+            Default: Fin
+
+          EnviarEscalado:
+            Type: Task
+            Resource: !GetAtt EnviarLambdaFunction.Arn
+            InputPath: "$.verificacion.paqueteEscalado"
+            ResultPath: "$.envio"
+            Next: RequiereConfirmacion
+
+          Fin:
+            Type: Succeed
+
+resources:
+  Resources:
+    TablaDestinatario:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: arquifusion-${sls:stage}-destinatario
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: destinatario_id
+            AttributeType: S
+          - AttributeName: rol
+            AttributeType: S
+          - AttributeName: ts_registrado
+            AttributeType: S
+        KeySchema:
+          - AttributeName: destinatario_id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: por_rol
+            KeySchema:
+              - AttributeName: rol
+                KeyType: HASH
+              - AttributeName: ts_registrado
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+
+    TablaNotificacion:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: arquifusion-${sls:stage}-notificacion
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: notificacion_id
+            AttributeType: S
+          - AttributeName: maquina_id
+            AttributeType: S
+          - AttributeName: ts_enviado
+            AttributeType: S
+        KeySchema:
+          - AttributeName: notificacion_id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: por_maquina
+            KeySchema:
+              - AttributeName: maquina_id
+                KeyType: HASH
+              - AttributeName: ts_enviado
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+
+    TopicOperador:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: arquifusion-${sls:stage}-operador
+
+    TopicTecnico:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: arquifusion-${sls:stage}-tecnico
+
+    TopicJefeMantenimiento:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: arquifusion-${sls:stage}-jefe-mantenimiento
+
+    TopicSupervisor:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: arquifusion-${sls:stage}-supervisor
+
+    TopicGerencia:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: arquifusion-${sls:stage}-gerencia
+
+  Outputs:
+    TopicOperadorArn:
+      Value: !Ref TopicOperador
+    TopicTecnicoArn:
+      Value: !Ref TopicTecnico
+    TopicJefeMantenimientoArn:
+      Value: !Ref TopicJefeMantenimiento
+    TopicSupervisorArn:
+      Value: !Ref TopicSupervisor
+    TopicGerenciaArn:
+      Value: !Ref TopicGerencia
