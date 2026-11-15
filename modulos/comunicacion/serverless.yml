@@ -37,6 +37,7 @@ package:
     - '!**'
     - 'handler.py'
     - 'plantillas.py'
+    - 'prompts.py'
 
 plugins:
   - serverless-step-functions
@@ -60,6 +61,7 @@ functions:
 
   clasificar:
     handler: handler.clasificar
+    timeout: 30
     layers:
       - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
 

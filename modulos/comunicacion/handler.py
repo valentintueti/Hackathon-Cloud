@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 import boto3
 
 import plantillas
+import prompts
+from comun import ia
 from comun.ddb import a_dynamo, actualizar, tabla
 
 sns = boto3.client("sns")
@@ -92,6 +94,7 @@ def enviar(event, context):
                 "estado": "enviada",
                 "requiere_confirmacion": es_principal,
                 "incidente_ref": a_dynamo(incidente_ref),
+                "redactado_por": paquete.get("redactadoPor", "plantilla"),
                 "ts_enviado": ahora,
             }
         )
@@ -138,6 +141,7 @@ def verificar_confirmacion(event, context):
     nuevo_paquete["mensajes"] = plantillas.generar_mensajes(
         "escalada", paquete.get("severidad", ""), incidente_ref, {siguiente_rol}
     )
+    nuevo_paquete["redactadoPor"] = "plantilla"
 
     return {"confirmado": False, "escalar": True, "paqueteEscalado": nuevo_paquete}
 
@@ -219,12 +223,13 @@ def _clasificar_alerta(detalle):
             roles_informativos.append("jefe-mantenimiento")
 
     roles_mensaje = set(roles_informativos + ([rol_principal] if rol_principal else []))
-    mensajes = plantillas.generar_mensajes("alerta", severidad, detalle, roles_mensaje)
+    mensajes, redactado_por = _redactar("alerta", severidad, detalle, roles_mensaje)
 
     return {
         "rolesInformativos": roles_informativos,
         "rolPrincipal": rol_principal,
         "mensajes": mensajes,
+        "redactadoPor": redactado_por,
         "requiereConfirmacion": rol_principal is not None,
         "tiempoLimiteSegundos": TIEMPO_LIMITE_CONFIRMACION_SEGUNDOS,
         "incidenteRef": incidente_ref,
@@ -247,12 +252,13 @@ def _clasificar_orden_creada(detalle):
         roles_informativos.append("jefe-mantenimiento")
 
     roles_mensaje = set(roles_informativos + ([rol_principal] if rol_principal else []))
-    mensajes = plantillas.generar_mensajes("orden_creada", prioridad, detalle, roles_mensaje)
+    mensajes, redactado_por = _redactar("alerta", severidad, detalle, roles_mensaje)
 
     return {
         "rolesInformativos": roles_informativos,
         "rolPrincipal": rol_principal,
         "mensajes": mensajes,
+        "redactadoPor": redactado_por,
         "requiereConfirmacion": rol_principal is not None,
         "tiempoLimiteSegundos": TIEMPO_LIMITE_CONFIRMACION_SEGUNDOS,
         "incidenteRef": incidente_ref,
@@ -267,18 +273,36 @@ def _clasificar_orden_cerrada(detalle):
     incidente_ref = {"tipo": "orden", "refId": orden_id, "maquinaId": maquina_id}
 
     roles_informativos = ["jefe-mantenimiento", "supervisor"]
-    mensajes = plantillas.generar_mensajes("orden_cerrada", "informativa", detalle, set(roles_informativos))
+    mensajes, redactado_por = _redactar("alerta", severidad, detalle, roles_mensaje)
 
     return {
         "rolesInformativos": roles_informativos,
-        "rolPrincipal": None,
+        "rolPrincipal": rol_principal,
         "mensajes": mensajes,
+        "redactadoPor": redactado_por,
         "requiereConfirmacion": False,
         "tiempoLimiteSegundos": TIEMPO_LIMITE_CONFIRMACION_SEGUNDOS,
         "incidenteRef": incidente_ref,
         "severidad": "informativa",
         "cadenaEscalamiento": [],
     }
+
+def _redactar(tipo_evento, severidad, datos, roles):
+    respaldo = plantillas.generar_mensajes(tipo_evento, severidad, datos, roles)
+    respuesta = ia.generar_json(prompts.construir(tipo_evento, severidad, datos, roles), prompts.SISTEMA)
+    if not isinstance(respuesta, dict):
+        return respaldo, "plantilla"
+
+    mensajes, de_ia = {}, 0
+    for rol in roles:
+        texto = respuesta.get(rol)
+        if isinstance(texto, str) and texto.strip():
+            mensajes[rol] = texto.strip()[:1000]
+            de_ia += 1
+        else:
+            mensajes[rol] = respaldo[rol]
+    origen = "gemini" if de_ia == len(roles) else "mixto" if de_ia else "plantilla"
+    return mensajes, origen
 
 
 def _respuesta_http(codigo, cuerpo):
