@@ -1,0 +1,144 @@
+org: valentintuesta
+service: arquifusion-inusual
+frameworkVersion: '4'
+
+custom:
+  nucleoStack: arquifusion-nucleo-${sls:stage}
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 29
+  logRetentionInDays: 14
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  environment:
+    STAGE: ${sls:stage}
+    TABLA_MAQUINA: ${cf:${self:custom.nucleoStack}.TablaMaquina}
+    TABLA_ALERTA: ${cf:${self:custom.nucleoStack}.TablaAlerta}
+    TABLA_LINEA_BASE: !Ref TablaLineaBase
+    BUS: ${cf:${self:custom.nucleoStack}.BusName}
+    SECRET_NAME: arquifusion/${sls:stage}/config
+    DIAS_HISTORIA: "14"
+    MIN_MUESTRAS: "30"
+    Z_UMBRAL: "3"
+    MINUTOS_ENTRE_ALERTAS: "60"
+
+package:
+  patterns:
+    - '!**'
+    - 'handler.py'
+    - 'estadistica.py'
+    - 'sql/**'
+
+plugins:
+  - serverless-step-functions
+
+functions:
+  calcularLineasBase:
+    handler: handler.calcular_lineas_base
+    description: (Step Function) calcula en BigQuery la media y desviacion por maquina y por modelo
+    timeout: 120
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  copiarADynamo:
+    handler: handler.copiar_a_dynamo
+    description: (Step Function) copia las lineas base de BigQuery a DynamoDB
+    timeout: 300
+    memorySize: 512
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  comparar:
+    handler: handler.comparar
+    description: Compara cada lote con las lineas base (z-score propio y de pares) y registra lo inusual
+    timeout: 60
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - eventBridge:
+          eventBus: ${cf:${self:custom.nucleoStack}.BusArn}
+          pattern:
+            source:
+              - arquifusion.nucleo
+            detail-type:
+              - LecturasProcesadas
+
+stepFunctions:
+  stateMachines:
+    lineasBase:
+      id: LineasBaseStateMachine
+      name: lineas-base-${sls:stage}
+      type: STANDARD
+      role: arn:aws:iam::${aws:accountId}:role/LabRole
+      definition:
+        Comment: Recalcula cada noche las lineas base (propia y de pares) en BigQuery y las copia a DynamoDB
+        StartAt: CalcularEnBigQuery
+        States:
+          CalcularEnBigQuery:
+            Type: Task
+            Resource: !GetAtt CalcularLineasBaseLambdaFunction.Arn
+            Retry:
+              - ErrorEquals: ["States.TaskFailed"]
+                IntervalSeconds: 30
+                MaxAttempts: 2
+                BackoffRate: 2.0
+            Next: HayDatos
+
+          HayDatos:
+            Type: Choice
+            Choices:
+              - Variable: $.filas
+                NumericGreaterThan: 0
+                Next: CopiarADynamo
+            Default: SinDatos
+
+          CopiarADynamo:
+            Type: Task
+            Resource: !GetAtt CopiarADynamoLambdaFunction.Arn
+            Retry:
+              - ErrorEquals: ["States.TaskFailed"]
+                IntervalSeconds: 15
+                MaxAttempts: 2
+                BackoffRate: 2.0
+            End: true
+
+          SinDatos:
+            Type: Pass
+            Result: "No hay telemetria suficiente en BigQuery para calcular lineas base"
+            End: true
+
+resources:
+  Resources:
+    TablaLineaBase:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: arquifusion-${sls:stage}-linea_base
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: clave
+            AttributeType: S
+        KeySchema:
+          - AttributeName: clave
+            KeyType: HASH
+
+    ScheduleLineasBase:
+      Type: AWS::Scheduler::Schedule
+      Properties:
+        Name: lineas-base-diario-${sls:stage}
+        Description: Recalcula las lineas base cada noche (02:00 hora de Peru)
+        ScheduleExpression: cron(0 2 * * ? *)
+        ScheduleExpressionTimezone: America/Lima
+        State: ENABLED
+        FlexibleTimeWindow:
+          Mode: "OFF"
+        Target:
+          Arn: !Ref LineasBaseStateMachine
+          RoleArn: arn:aws:iam::${aws:accountId}:role/LabRole
+          Input: "{}"
