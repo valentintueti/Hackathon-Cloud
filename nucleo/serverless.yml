@@ -34,7 +34,7 @@ layers:
   comun:
     path: layer
     name: arquifusion-${sls:stage}-comun
-    description: Codigo compartido de ArquiFusion (config, DynamoDB)
+    description: Codigo compartido de ArquiFusion (config, DynamoDB, BigQuery, Gemini)
     compatibleRuntimes:
       - python3.12
     package:
