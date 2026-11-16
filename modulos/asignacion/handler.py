@@ -230,8 +230,12 @@ def registrar_tecnico(event, context):
         datos = json.loads(event.get("body") or "{}")
     except json.JSONDecodeError:
         return _http(400, {"error": "El cuerpo no es JSON valido"})
-    if not datos.get("nombre") or not datos.get("especialidades") or not datos.get("zona_id"):
-        return _http(400, {"error": "Faltan nombre, especialidades o zona_id"})
+    especialidades = datos.get("especialidades")
+    if isinstance(especialidades, str):
+        especialidades = especialidades.split(",")
+    especialidades = [str(e).strip().lower() for e in especialidades or [] if str(e).strip()]
+    if not datos.get("nombre") or not especialidades or not datos.get("zona_id"):
+        return _http(400, {"error": "Faltan nombre, especialidades (lista o texto separado por comas) o zona_id"})
 
     tecnico_id = str(datos.get("tecnico_id") or uuid.uuid4())
     previo = tecnicos.get_item(Key={"tecnico_id": tecnico_id}).get("Item", {})
@@ -240,7 +244,7 @@ def registrar_tecnico(event, context):
         "tecnico_id": tecnico_id,
         "nombre": datos["nombre"],
         "contacto": datos.get("contacto") or previo.get("contacto"),
-        "especialidades": [str(e).lower() for e in datos["especialidades"]],
+        "especialidades": especialidades,
         "zona_id": datos["zona_id"],
         "lat": datos.get("lat", previo.get("lat")),
         "lon": datos.get("lon", previo.get("lon")),
@@ -262,6 +266,25 @@ def registrar_tecnico(event, context):
 
     tecnicos.put_item(Item=a_dynamo({k: v for k, v in tecnico.items() if v is not None}))
     return _http(200 if previo else 201, tecnico)
+
+
+def registrar_jefe(event, context):
+    try:
+        datos = json.loads(event.get("body") or "{}")
+    except json.JSONDecodeError:
+        return _http(400, {"error": "El cuerpo no es JSON valido"})
+    contacto = str(datos.get("contacto") or "").strip()
+    if not contacto:
+        return _http(400, {"error": "Falta contacto (correo o telefono)"})
+
+    suscripcion = sns.subscribe(
+        TopicArn=env("SNS_TOPIC_ARN"),
+        Protocol="email" if "@" in contacto else "sms",
+        Endpoint=contacto,
+        Attributes={"FilterPolicy": json.dumps({"destinatario": [JEFE]})},
+        ReturnSubscriptionArn=True,
+    )
+    return _http(201, {"contacto": contacto, "suscripcion_arn": suscripcion["SubscriptionArn"]})
 
 
 def listar_tecnicos(event, context):

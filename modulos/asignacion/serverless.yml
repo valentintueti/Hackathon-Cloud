@@ -132,6 +132,17 @@ functions:
           method: get
           cors: true
 
+  registrarJefe:
+    handler: handler.registrar_jefe
+    description: POST /jefes - suscribe un correo o telefono a los avisos de ordenes sin tecnico
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: jefes
+          method: post
+          cors: true
+
   listarAsignaciones:
     handler: handler.listar_asignaciones
     description: GET /asignaciones?orden=&tecnico=&estado= - lista de asignaciones
@@ -223,6 +234,9 @@ stepFunctions:
               - ErrorEquals: ["States.Timeout"]
                 ResultPath: $.error
                 Next: Vencida
+              - ErrorEquals: ["States.ALL"]
+                ResultPath: $.error
+                Next: Fallida
             Next: Acepto
 
           Acepto:
@@ -247,6 +261,12 @@ stepFunctions:
           Vencida:
             Type: Pass
             Result: vencida
+            ResultPath: $.resultado
+            Next: Liberar
+
+          Fallida:
+            Type: Pass
+            Result: fallida
             ResultPath: $.resultado
             Next: Liberar
 
