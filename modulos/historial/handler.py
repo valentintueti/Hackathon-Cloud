@@ -157,6 +157,37 @@ def desde_alerta(event, context):
     return _registrar_incidente(datos, origen="alerta")
 
 
+def desde_asignacion(event, context):
+    detalle = event["detail"]
+    orden_id = str(detalle.get("orden_id") or "")
+    orden = ordenes.get_item(Key={"orden_id": orden_id}).get("Item") if orden_id else None
+    if not orden:
+        return {"omitida": f"orden {orden_id} no encontrada"}
+    if orden.get("estado") != "pendiente":
+        return {"omitida": f"la orden {orden_id} ya estaba en '{orden.get('estado')}'"}
+
+    try:
+        actualizar(
+            ordenes,
+            clave={"orden_id": orden_id},
+            campos={
+                "estado": "asignada",
+                logica.CAMPO_TS["asignada"]: detalle.get("ts_asignada") or _ahora(),
+                "tecnico_id": detalle.get("tecnico_id"),
+                "asignacion_id": detalle.get("asignacion_id"),
+            },
+            condicion="#estado = :pendiente",
+            valores_extra={":pendiente": "pendiente"},
+        )
+    except ordenes.meta.client.exceptions.ConditionalCheckFailedException:
+        return {"omitida": f"la orden {orden_id} cambio de estado mientras se asignaba"}
+
+    if orden.get("token_pendiente") and orden.get("etapa_esperada") == "asignada":
+        _reanudar(orden_id, orden["token_pendiente"], "asignada")
+    print(f"Orden {orden_id} asignada a {detalle.get('tecnico_id')} desde el modulo de asignacion")
+    return {"orden_id": orden_id, "estado": "asignada", "tecnico_id": detalle.get("tecnico_id")}
+
+
 def _registrar_incidente(datos, origen):
     orden = {
         "orden_id": str(uuid.uuid4()),

@@ -101,6 +101,20 @@ functions:
               maquina_id:
                 - exists: true
 
+  desdeAsignacion:
+    handler: handler.desde_asignacion
+    description: Pasa la orden a asignada y reanuda su Step Function cuando un tecnico acepta (si existe el modulo de asignacion)
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - eventBridge:
+          eventBus: ${cf:${self:custom.nucleoStack}.BusArn}
+          pattern:
+            source:
+              - arquifusion.asignacion
+            detail-type:
+              - OrdenAsignada
+
 stepFunctions:
   stateMachines:
     cicloIncidente:
