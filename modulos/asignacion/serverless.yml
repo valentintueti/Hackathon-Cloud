@@ -1,0 +1,325 @@
+org: valentintuesta
+service: arquifusion-asignacion
+frameworkVersion: '4'
+
+custom:
+  nucleoStack: arquifusion-nucleo-${sls:stage}
+
+provider:
+  name: aws
+  runtime: python3.12
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 29
+  logRetentionInDays: 14
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole
+  environment:
+    STAGE: ${sls:stage}
+    TABLA_MAQUINA: ${cf:${self:custom.nucleoStack}.TablaMaquina}
+    TABLA_TECNICO: !Ref TablaTecnico
+    TABLA_ASIGNACION: !Ref TablaAsignacion
+    BUS: ${cf:${self:custom.nucleoStack}.BusName}
+    SNS_TOPIC_ARN: !Ref TopicTecnicos
+    SECRET_NAME: arquifusion/${sls:stage}/config
+    VELOCIDAD_KMH: "40"
+    TIEMPOS_REPARACION_MIN: '{"motor": 120, "hidraulica": 90, "electrica": 60}'
+    MAX_CANDIDATOS: "5"
+
+package:
+  patterns:
+    - '!**'
+    - 'handler.py'
+    - 'puntaje.py'
+
+plugins:
+  - serverless-step-functions
+
+functions:
+  solicitar:
+    handler: handler.solicitar
+    description: Recibe OrdenCreada del bus e inicia la Step Function asignacion (name = orden_id)
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    environment:
+      STATE_MACHINE_ARN: !Ref AsignacionStateMachine
+    events:
+      - eventBridge:
+          eventBus: ${cf:${self:custom.nucleoStack}.BusArn}
+          pattern:
+            detail-type:
+              - OrdenCreada
+
+  buscarCandidatos:
+    handler: handler.buscar_candidatos
+    description: (Step Function) arma el ranking de tecnicos disponibles con puntaje.py
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  asignar:
+    handler: handler.asignar
+    description: (Step Function) reserva al mejor candidato con escritura condicional y crea la asignacion pendiente
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  guardarToken:
+    handler: handler.guardar_token
+    description: (Step Function) guarda el task token en la asignacion y avisa al tecnico por SNS
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  confirmar:
+    handler: handler.confirmar
+    description: (Step Function) el tecnico acepto - asignacion aceptada, tecnico ocupado y publica OrdenAsignada
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  liberar:
+    handler: handler.liberar
+    description: (Step Function) el tecnico rechazo o no respondio - lo libera y lo agrega a rechazados
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  avisarJefe:
+    handler: handler.avisar_jefe
+    description: (Step Function) avisa al jefe de mantenimiento cuando no hay tecnicos tras 3 intentos
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+
+  responder:
+    handler: handler.responder
+    description: POST /asignaciones/{asignacion_id}/responder - el tecnico acepta o rechaza y se reanuda la Step Function
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: asignaciones/{asignacion_id}/responder
+          method: post
+          cors: true
+
+  completar:
+    handler: handler.completar
+    description: Recibe OrdenCerrada - asignacion completada y tecnico disponible
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - eventBridge:
+          eventBus: ${cf:${self:custom.nucleoStack}.BusArn}
+          pattern:
+            detail-type:
+              - OrdenCerrada
+
+  registrarTecnico:
+    handler: handler.registrar_tecnico
+    description: POST /tecnicos - registra o actualiza un tecnico y crea su suscripcion SNS con filtro
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: tecnicos
+          method: post
+          cors: true
+
+  listarTecnicos:
+    handler: handler.listar_tecnicos
+    description: GET /tecnicos?zona=&estado= - lista de tecnicos
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: tecnicos
+          method: get
+          cors: true
+
+  listarAsignaciones:
+    handler: handler.listar_asignaciones
+    description: GET /asignaciones?orden=&tecnico=&estado= - lista de asignaciones
+    layers:
+      - ${cf:${self:custom.nucleoStack}.ComunLayerArn}
+    events:
+      - http:
+          path: asignaciones
+          method: get
+          cors: true
+
+stepFunctions:
+  stateMachines:
+    asignacion:
+      id: AsignacionStateMachine
+      name: asignacion-${sls:stage}
+      type: STANDARD
+      role: arn:aws:iam::${aws:accountId}:role/LabRole
+      definition:
+        Comment: Una ejecucion por orden - elige tecnico, espera su respuesta y reasigna si rechaza o no responde
+        StartAt: SegunGravedad
+        States:
+          SegunGravedad:
+            Type: Choice
+            Choices:
+              - Or:
+                  - Variable: $.gravedad
+                    StringEquals: critica
+                  - Variable: $.gravedad
+                    StringEquals: alta
+                Next: BuscarCandidatos
+            Default: EsperarTurno
+
+          EsperarTurno:
+            Type: Wait
+            Seconds: 120
+            Next: BuscarCandidatos
+
+          BuscarCandidatos:
+            Type: Task
+            Resource: !GetAtt BuscarCandidatosLambdaFunction.Arn
+            Retry:
+              - ErrorEquals: ["States.TaskFailed"]
+                IntervalSeconds: 5
+                MaxAttempts: 2
+                BackoffRate: 2.0
+            Next: HayCandidatos
+
+          HayCandidatos:
+            Type: Choice
+            Choices:
+              - Variable: $.cantidad
+                NumericGreaterThan: 0
+                Next: Asignar
+              - Variable: $.intentos
+                NumericGreaterThanEquals: 3
+                Next: AvisarJefe
+            Default: EsperarTecnicos
+
+          EsperarTecnicos:
+            Type: Wait
+            Seconds: 600
+            Next: BuscarCandidatos
+
+          Asignar:
+            Type: Task
+            Resource: !GetAtt AsignarLambdaFunction.Arn
+            Next: ConsiguioTecnico
+
+          ConsiguioTecnico:
+            Type: Choice
+            Choices:
+              - Variable: $.asignado
+                BooleanEquals: true
+                Next: EsperarRespuesta
+            Default: BuscarCandidatos
+
+          EsperarRespuesta:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke.waitForTaskToken
+            Parameters:
+              FunctionName: !GetAtt GuardarTokenLambdaFunction.Arn
+              Payload:
+                asignacion_id.$: $.asignacion_id
+                token.$: $$.Task.Token
+            TimeoutSeconds: 900
+            ResultPath: $.respuesta
+            Catch:
+              - ErrorEquals: ["States.Timeout"]
+                ResultPath: $.error
+                Next: Vencida
+            Next: Acepto
+
+          Acepto:
+            Type: Choice
+            Choices:
+              - Variable: $.respuesta.acepta
+                BooleanEquals: true
+                Next: Confirmar
+            Default: Rechazada
+
+          Confirmar:
+            Type: Task
+            Resource: !GetAtt ConfirmarLambdaFunction.Arn
+            End: true
+
+          Rechazada:
+            Type: Pass
+            Result: rechazada
+            ResultPath: $.resultado
+            Next: Liberar
+
+          Vencida:
+            Type: Pass
+            Result: vencida
+            ResultPath: $.resultado
+            Next: Liberar
+
+          Liberar:
+            Type: Task
+            Resource: !GetAtt LiberarLambdaFunction.Arn
+            Next: BuscarCandidatos
+
+          AvisarJefe:
+            Type: Task
+            Resource: !GetAtt AvisarJefeLambdaFunction.Arn
+            End: true
+
+resources:
+  Resources:
+    TablaTecnico:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: arquifusion-${sls:stage}-tecnico
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: tecnico_id
+            AttributeType: S
+        KeySchema:
+          - AttributeName: tecnico_id
+            KeyType: HASH
+
+    TablaAsignacion:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: arquifusion-${sls:stage}-asignacion
+        BillingMode: PAY_PER_REQUEST
+        PointInTimeRecoverySpecification:
+          PointInTimeRecoveryEnabled: true
+        AttributeDefinitions:
+          - AttributeName: asignacion_id
+            AttributeType: S
+          - AttributeName: orden_id
+            AttributeType: S
+          - AttributeName: tecnico_id
+            AttributeType: S
+          - AttributeName: ts_creada
+            AttributeType: S
+        KeySchema:
+          - AttributeName: asignacion_id
+            KeyType: HASH
+        GlobalSecondaryIndexes:
+          - IndexName: por_orden
+            KeySchema:
+              - AttributeName: orden_id
+                KeyType: HASH
+              - AttributeName: ts_creada
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+          - IndexName: por_tecnico
+            KeySchema:
+              - AttributeName: tecnico_id
+                KeyType: HASH
+              - AttributeName: ts_creada
+                KeyType: RANGE
+            Projection:
+              ProjectionType: ALL
+
+    TopicTecnicos:
+      Type: AWS::SNS::Topic
+      Properties:
+        TopicName: tecnicos-${sls:stage}
+
+  Outputs:
+    TopicTecnicosArn:
+      Value: !Ref TopicTecnicos
+    AsignacionStateMachineArn:
+      Value: !Ref AsignacionStateMachine
