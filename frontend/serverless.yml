@@ -1,0 +1,51 @@
+org: valentintuesta
+service: arquifusion-frontend
+frameworkVersion: '4'
+
+provider:
+  name: aws
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+
+resources:
+  Resources:
+    SitioBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName: arquifusion-frontend-${sls:stage}-${aws:accountId}
+        WebsiteConfiguration:
+          IndexDocument: index.html
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: false
+          BlockPublicPolicy: false
+          IgnorePublicAcls: false
+          RestrictPublicBuckets: false
+        OwnershipControls:
+          Rules:
+            - ObjectOwnership: BucketOwnerEnforced
+
+    SitioBucketPolicy:
+      Type: AWS::S3::BucketPolicy
+      Properties:
+        Bucket:
+          Ref: SitioBucket
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Sid: LecturaPublica
+              Effect: Allow
+              Principal: '*'
+              Action: s3:GetObject
+              Resource:
+                Fn::Join:
+                  - ''
+                  - - Fn::GetAtt: [SitioBucket, Arn]
+                    - '/*'
+
+  Outputs:
+    SitioBucketNombre:
+      Value:
+        Ref: SitioBucket
+    SitioUrl:
+      Value:
+        Fn::GetAtt: [SitioBucket, WebsiteURL]
