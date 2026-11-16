@@ -27,8 +27,11 @@ provider:
 
 package:
   patterns:
-    - '!**'
-    - 'handlers/**'
+    - '!layer/**'
+    - '!bigquery/**'
+    - '!node_modules/**'
+    - '!secreto.json'
+    - '!*.json'
 
 layers:
   comun:
